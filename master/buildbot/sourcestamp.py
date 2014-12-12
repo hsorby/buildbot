@@ -179,8 +179,7 @@ class SourceStamp(util.ComparableMixin, styles.Versioned):
         if other.project != self.project:
             return False
         if self.patch or other.patch:
-            # you can't merge patched builds with anything else
-            return self is other
+            return False # you can't merge patched builds with anything
 
         if self.changes and other.changes:
             return True

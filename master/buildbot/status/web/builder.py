@@ -162,7 +162,7 @@ class ForceBuildActionResource(ActionResource):
                     yield sch.force(owner, builder_name, **args)
                     msg = ""
                 except ValidationError, e:
-                    msg = html.escape(e.message.encode('ascii','ignore'))
+                    msg = html.escape(str(e).encode('ascii','ignore'))
                 break
 
         # send the user back to the builder page

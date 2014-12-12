@@ -82,8 +82,38 @@ def getChanges(request, options = None):
             request
                 the http request object
         """
+        print 'here I am', 'in getChanges()'
+        event_type = request.getHeader('x-github-event')
+        if event_type == 'ping':
+            return (None, 'git')
+        elif event_type == 'pull_request':
+            print 'What do we do now'
+            return (None, 'git')
+        elif event_type != 'push':
+            return (None, 'git')
+
+        print request.getAllHeaders()
+        print '===================='
+        print dir(request)
+        print request.args
         payload = json.loads(request.args['payload'][0])
-        user = payload['repository']['owner']['name']
+        print payload
+        print payload.keys()
+        print payload['repository']
+        print payload['repository'].keys()
+        print payload['repository']['owner']
+        print payload['repository']['owner'].keys()
+        print payload['repository']['owner']['login']
+        print payload['repository']['owner']['id']
+        print payload['repository']['name']
+        print payload['repository']['url']
+        if 'name' in payload['repository']['owner']:
+            user = payload['repository']['owner']['name']
+        elif 'login' in payload['repository']['owner']:
+            user = payload['repository']['owner']['login']
+        else:
+            user = 'bob'
+        #user = payload['repository']['owner']['name']
         repo = payload['repository']['name']
         repo_url = payload['repository']['url']
         project = request.args.get('project', None)

@@ -172,13 +172,7 @@ class TestBuilderBuildCreation(unittest.TestCase):
                 project='p', repository='r', codebase='cbA', changes=[])
         ss2 = sourcestamp.SourceStamp(branch='dev', revision='xyz',
                 project='p', repository='r', codebase='cbB', changes=[])
-        self.assertFalse(ss1.canBeMergedWith(ss2))
-        
-    def test_canBeMergedWith_with_self_patched_sourcestamps(self):
-        ss = sourcestamp.SourceStamp(branch='dev', revision='xyz',
-                project='p', repository='r', codebase='cbA', changes=[],
-                patch=(1, ''))
-        self.assertTrue(ss.canBeMergedWith(ss))        
+        self.assertFalse(ss1.canBeMergedWith(ss2))        
 
     def test_constructor_most_recent_change(self):
         chgs = [
