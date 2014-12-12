@@ -241,9 +241,9 @@ class ShellCommand(buildstep.LoggingBuildStep):
         kwargs.update(self.remote_kwargs)
         tmp = []
         if isinstance(self.command, list):
-           self._flattenList(tmp, self.command) 
+            self._flattenList(tmp, self.command) 
         else:
-           tmp = self.command
+            tmp = self.command
 
         kwargs['command'] = tmp 
 
