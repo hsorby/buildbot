@@ -25,7 +25,7 @@ from twisted.python import log
 from twisted.internet import defer
 
 class ChangeHookResource(resource.Resource):
-     # this is a cheap sort of template thingy
+    # this is a cheap sort of template thingy
     contentType = "text/html; charset=utf-8"
     children    = {}
     def __init__(self, dialects={}):
