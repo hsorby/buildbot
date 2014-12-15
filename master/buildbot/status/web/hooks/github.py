@@ -28,6 +28,7 @@ import re
 import datetime
 from twisted.python import log
 import calendar
+import requests
 
 try:
     import json
@@ -82,48 +83,35 @@ def getChanges(request, options = None):
             request
                 the http request object
         """
-        print 'here I am', 'in getChanges()'
+        changes = []
         event_type = request.getHeader('x-github-event')
         if event_type == 'ping':
             return (None, 'git')
         elif event_type == 'pull_request':
-            print 'What do we do now'
-            return (None, 'git')
-        elif event_type != 'push':
+            project = None
+            payload = json.loads(request.args['payload'][0])
+            action = payload['action']
+            if action == 'synchronize' or action == 'create':
+                # from payload get events list from event originating repo
+                changes = get_pull_changes(payload)
+                # from events list get push event that matches head from pull request payload
+#                 new_request = request
+        elif event_type == 'push':
+            payload = json.loads(request.args['payload'][0])
+            user = payload['repository']['owner']['name']
+            repo = payload['repository']['name']
+            repo_url = payload['repository']['url']
+            project = request.args.get('project', None)
+            if project:
+                project = project[0]
+            elif project is None:
+                project = ''
+            # This field is unused:
+            #private = payload['repository']['private']
+            changes = process_change(payload, user, repo, repo_url, project)
+        else:
             return (None, 'git')
 
-        print request.getAllHeaders()
-        print '===================='
-        print dir(request)
-        print request.args
-        payload = json.loads(request.args['payload'][0])
-        print payload
-        print payload.keys()
-        print payload['repository']
-        print payload['repository'].keys()
-        print payload['repository']['owner']
-        print payload['repository']['owner'].keys()
-        print payload['repository']['owner']['login']
-        print payload['repository']['owner']['id']
-        print payload['repository']['name']
-        print payload['repository']['url']
-        if 'name' in payload['repository']['owner']:
-            user = payload['repository']['owner']['name']
-        elif 'login' in payload['repository']['owner']:
-            user = payload['repository']['owner']['login']
-        else:
-            user = 'bob'
-        #user = payload['repository']['owner']['name']
-        repo = payload['repository']['name']
-        repo_url = payload['repository']['url']
-        project = request.args.get('project', None)
-        if project:
-            project = project[0]
-        elif project is None:
-            project = ''
-        # This field is unused:
-        #private = payload['repository']['private']
-        changes = process_change(payload, user, repo, repo_url, project)
         log.msg("Received %s changes from github" % len(changes))
         return (changes, 'git')
 
@@ -137,7 +125,6 @@ def process_change(payload, user, repo, repo_url, project):
                 Hook.
         """
         changes = []
-        newrev = payload['after']
         refname = payload['ref']
 
         # We only care about regular heads, i.e. branches
@@ -147,7 +134,7 @@ def process_change(payload, user, repo, repo_url, project):
             return []
 
         branch = match.group(1)
-        if re.match(r"^0*$", newrev):
+        if 'after' in payload and re.match(r"^0*$", payload['after']):
             log.msg("Branch `%s' deleted, ignoring" % branch)
             return []
         else: 
@@ -175,3 +162,72 @@ def process_change(payload, user, repo, repo_url, project):
                 changes.append(chdict) 
             return changes
         
+def get_pull_changes(payload):
+    """
+    Get the changes from the associated push for the given payload.
+    """
+    changes = []
+#     user = payload['repository']['owner']['login']
+#     repo = payload['repository']['name']
+    
+    project = ''
+    commit = get_head_commit(payload)
+    if commit:
+#         print commit
+        branch = payload['pull_request']['head']['ref']
+        repo_url = payload['pull_request']['head']['repo']['git_url']
+        files = []
+        for commit_file in commit['files']:
+            files.append(commit_file['filename'])
+            
+        # A really rough conversion from one data format to another
+        commit_date = commit['commit']['committer']['date']
+        if commit_date.endswith('Z'):
+            commit_date = commit_date.replace('Z', '+00:00')
+        when =  convertTime(commit_date)
+        log.msg("New revision: %s" % commit['sha'][:8])
+        log.msg("======= %s, branch %s" % (repo_url, branch))
+        chdict = dict(
+            who      = commit['commit']['author']['name'] 
+                        + " <" + commit['commit']['author']['email'] + ">",
+            files    = files,
+            comments = commit['commit']['message'],
+            revision = commit['sha'],
+            when     = when,
+#             codebase = 'github',
+            branch   = branch,
+            revlink  = commit['url'], 
+            repository = repo_url,
+            project  = project)
+
+        changes.append(chdict) 
+
+    return changes
+
+def get_head_commit(payload):
+    """
+    Get whatever we need from this payload
+    """
+    commits_url = payload['pull_request']['head']['repo']['commits_url']
+    pull_request_head = payload['pull_request']['head']['sha']
+    print commits_url, pull_request_head
+    commits_url = commits_url.replace('{/sha}', '/{sha}')
+    print commits_url
+    commit_url = commits_url.format(sha=pull_request_head)
+    print commit_url
+    commit_response = requests.get(commit_url)
+    if commit_response.status_code == 200:
+        commit = commit_response.json()
+        return commit
+#         index = 0
+#         push_event_found = False
+#         while not push_event_found and index < len(events):
+#             current_event = events[index]
+#             if current_event['type'] == 'PushEvent':
+#                 current_payload = current_event['payload']
+#                 current_head = current_payload['head']
+#                 if current_head == pull_request_head:
+#                     push_event_found = True
+#                     payload = current_payload
+#             
+#             index = index + 1
