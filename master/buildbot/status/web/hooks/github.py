@@ -88,14 +88,11 @@ def getChanges(request, options = None):
         if event_type == 'ping':
             return (None, 'git')
         elif event_type == 'pull_request':
-            project = None
             payload = json.loads(request.args['payload'][0])
             action = payload['action']
             if action == 'synchronize' or action == 'create':
                 # from payload get events list from event originating repo
                 changes = get_pull_changes(payload)
-                # from events list get push event that matches head from pull request payload
-#                 new_request = request
         elif event_type == 'push':
             payload = json.loads(request.args['payload'][0])
             user = payload['repository']['owner']['name']
@@ -167,13 +164,10 @@ def get_pull_changes(payload):
     Get the changes from the associated push for the given payload.
     """
     changes = []
-#     user = payload['repository']['owner']['login']
-#     repo = payload['repository']['name']
     
     project = ''
     commit = get_head_commit(payload)
     if commit:
-#         print commit
         branch = payload['pull_request']['head']['ref']
         repo_url = payload['pull_request']['head']['repo']['git_url']
         files = []
@@ -185,8 +179,7 @@ def get_pull_changes(payload):
         if commit_date.endswith('Z'):
             commit_date = commit_date.replace('Z', '+00:00')
         when =  convertTime(commit_date)
-        log.msg("New revision: %s" % commit['sha'][:8])
-        log.msg("======= %s, branch %s" % (repo_url, branch))
+        log.msg("New revision: %s on %s" % (commit['sha'][:8], repo_url))
         chdict = dict(
             who      = commit['commit']['author']['name'] 
                         + " <" + commit['commit']['author']['email'] + ">",
@@ -194,8 +187,8 @@ def get_pull_changes(payload):
             comments = commit['commit']['message'],
             revision = commit['sha'],
             when     = when,
-#             codebase = 'github',
             branch   = branch,
+            properties = {'statuses_url': str(payload['pull_request']['statuses_url'])}, #, 'Change']},
             revlink  = commit['url'], 
             repository = repo_url,
             project  = project)
@@ -210,24 +203,10 @@ def get_head_commit(payload):
     """
     commits_url = payload['pull_request']['head']['repo']['commits_url']
     pull_request_head = payload['pull_request']['head']['sha']
-    print commits_url, pull_request_head
     commits_url = commits_url.replace('{/sha}', '/{sha}')
-    print commits_url
     commit_url = commits_url.format(sha=pull_request_head)
-    print commit_url
     commit_response = requests.get(commit_url)
     if commit_response.status_code == 200:
         commit = commit_response.json()
         return commit
-#         index = 0
-#         push_event_found = False
-#         while not push_event_found and index < len(events):
-#             current_event = events[index]
-#             if current_event['type'] == 'PushEvent':
-#                 current_payload = current_event['payload']
-#                 current_head = current_payload['head']
-#                 if current_head == pull_request_head:
-#                     push_event_found = True
-#                     payload = current_payload
-#             
-#             index = index + 1
+
