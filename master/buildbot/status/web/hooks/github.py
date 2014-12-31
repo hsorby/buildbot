@@ -169,7 +169,7 @@ def get_pull_changes(payload):
     commit = get_head_commit(payload)
     if commit:
         branch = payload['pull_request']['head']['ref']
-        repo_url = payload['pull_request']['head']['repo']['git_url']
+        repo_url = payload['pull_request']['head']['repo']['ssh_url']
         files = []
         for commit_file in commit['files']:
             files.append(commit_file['filename'])
