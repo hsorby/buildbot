@@ -90,7 +90,7 @@ def getChanges(request, options = None):
         elif event_type == 'pull_request':
             payload = json.loads(request.args['payload'][0])
             action = payload['action']
-            if action == 'synchronize' or action == 'create':
+            if action == 'synchronize' or action == 'opened':
                 # from payload get events list from event originating repo
                 changes = get_pull_changes(payload)
         elif event_type == 'push':
