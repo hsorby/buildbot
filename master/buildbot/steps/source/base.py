@@ -28,7 +28,7 @@ class Source(LoggingBuildStep):
 
     renderables = LoggingBuildStep.renderables + [
                      'description', 'descriptionDone', 'descriptionSuffix',
-                     'workdir' ]
+                     'workdir', 'env']
 
     description = None # set this to a list of short strings to override
     descriptionDone = None # alternate description when the step is complete
@@ -154,6 +154,11 @@ class Source(LoggingBuildStep):
              "Sourcestep %s does not have a codebase, other sourcesteps do" \
              % self.name
             LoggingBuildStep.setProperty(self, name, value, source)
+
+    def setBuild(self, build):
+        LoggingBuildStep.setBuild(self, build)
+        # Set this here, so it gets rendered when we start the step
+        self.slaveEnvironment = self.build.slaveEnvironment
 
     def setStepStatus(self, step_status):
         LoggingBuildStep.setStepStatus(self, step_status)

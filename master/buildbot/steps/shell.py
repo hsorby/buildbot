@@ -115,6 +115,7 @@ class ShellCommand(buildstep.LoggingBuildStep):
             if k in self.__class__.parms:
                 buildstep_kwargs[k] = kwargs[k]
                 del kwargs[k]
+
         buildstep.LoggingBuildStep.__init__(self, **buildstep_kwargs)
 
         # everything left over goes to the RemoteShellCommand
@@ -266,7 +267,6 @@ class ShellCommand(buildstep.LoggingBuildStep):
         # the Source subclasses) can just skip straight to startCommand()
 
         warnings = []
-
         # create the actual RemoteShellCommand instance now
         kwargs = self.buildCommandKwargs(warnings)
         cmd = buildstep.RemoteShellCommand(**kwargs)

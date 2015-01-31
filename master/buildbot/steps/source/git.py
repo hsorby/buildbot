@@ -291,8 +291,11 @@ class Git(Source):
         defer.returnValue(0)
 
     def _dovccmd(self, command, abandonOnFailure=True, collectStdout=False, initialStdin=None):
+        kwargs = buildstep.LoggingBuildStep.buildCommandKwargs(self)
+        print kwargs
         cmd = buildstep.RemoteShellCommand(self.workdir, ['git'] + command,
-                                           env=self.env,
+                                           env=kwargs['env'],
+                                           #env=self.env,
                                            logEnviron=self.logEnviron,
                                            timeout=self.timeout,
                                            collectStdout=collectStdout,
