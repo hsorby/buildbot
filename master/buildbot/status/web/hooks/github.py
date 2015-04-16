@@ -146,7 +146,7 @@ def process_change(payload, user, repo, repo_url, project):
                 when =  convertTime( commit['timestamp'])
                 log.msg("New revision: %s" % commit['id'][:8])
                 chdict = dict(
-                    who      = commit['author']['name'] 
+                    author   = commit['author']['name'] 
                                 + " <" + commit['author']['email'] + ">",
                     files    = files,
                     comments = commit['message'], 
@@ -181,14 +181,17 @@ def get_pull_changes(payload):
         when =  convertTime(commit_date)
         log.msg("New revision: %s on %s" % (commit['sha'][:8], repo_url))
         chdict = dict(
-            who      = commit['commit']['author']['name'] 
+            author   = commit['commit']['author']['name'] 
                         + " <" + commit['commit']['author']['email'] + ">",
             files    = files,
             comments = commit['commit']['message'],
             revision = commit['sha'],
             when     = when,
             branch   = branch,
-            properties = {'statuses_url': str(payload['pull_request']['statuses_url'])}, #, 'Change']},
+            properties = {'statuses_url': str(payload['pull_request']['statuses_url']),
+                          'owner': str(payload['repository']['owner']['login']),
+                          'repo': str(payload['repository']['name']),
+                          'pull_number': str(payload['number'])}, #, 'Change']},
             revlink  = commit['url'], 
             repository = repo_url,
             project  = project)
