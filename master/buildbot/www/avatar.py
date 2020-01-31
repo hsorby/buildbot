@@ -14,12 +14,14 @@
 # Copyright Buildbot Team Members
 
 import hashlib
-import urllib
+from urllib.parse import urlencode
+from urllib.parse import urljoin
+
+from twisted.internet import defer
 
 from buildbot.util import config
+from buildbot.util import unicode2bytes
 from buildbot.www import resource
-from twisted.internet import defer
-from urlparse import urljoin
 
 
 class AvatarBase(config.ConfiguredMixin):
@@ -31,23 +33,33 @@ class AvatarBase(config.ConfiguredMixin):
 
 class AvatarGravatar(AvatarBase):
     name = "gravatar"
+    # gravatar does not want intranet URL, which is most of where the bots are
+    # just use same default as github (retro)
+    default = "retro"
 
     def getUserAvatar(self, email, size, defaultAvatarUrl):
         # construct the url
+        emailBytes = unicode2bytes(email.lower())
+        emailHash = hashlib.md5(emailBytes)
         gravatar_url = "//www.gravatar.com/avatar/"
-        gravatar_url += hashlib.md5(email.lower()).hexdigest() + "?"
-        gravatar_url += urllib.urlencode({'s': str(size), 'd': defaultAvatarUrl})
+        gravatar_url += emailHash.hexdigest() + "?"
+        if self.default != "url":
+            defaultAvatarUrl = self.default
+        url = {'d': defaultAvatarUrl, 's': str(size)}
+        sorted_url = sorted(url.items(), key=lambda x: x[0])
+        gravatar_url += urlencode(sorted_url)
         raise resource.Redirect(gravatar_url)
 
 
 class AvatarResource(resource.Resource):
     # enable reconfigResource calls
     needsReconfig = True
-    defaultAvatarUrl = "img/nobody.png"
+    defaultAvatarUrl = b"img/nobody.png"
 
     def reconfigResource(self, new_config):
         self.avatarMethods = new_config.www.get('avatar_methods', [])
-        self.defaultAvatarFullUrl = urljoin(new_config.buildbotURL, self.defaultAvatarUrl)
+        self.defaultAvatarFullUrl = urljoin(
+            unicode2bytes(new_config.buildbotURL), unicode2bytes(self.defaultAvatarUrl))
         self.cache = {}
         # ensure the avatarMethods is a iterable
         if isinstance(self.avatarMethods, AvatarBase):
@@ -58,19 +70,21 @@ class AvatarResource(resource.Resource):
 
     @defer.inlineCallbacks
     def renderAvatar(self, request):
-        email = request.args.get("email", [""])[0]
-        size = request.args.get("size", 32)
+        email = request.args.get(b"email", [b""])[0]
+        size = request.args.get(b"size", 32)
+        r = None
         if self.cache.get(email):
             r = self.cache[email]
         for method in self.avatarMethods:
             try:
                 res = yield method.getUserAvatar(email, size, self.defaultAvatarFullUrl)
-            except resource.Redirect, r:
-                self.cache[email] = r
+            except resource.Redirect:
+                if r is not None:
+                    self.cache[email] = r
                 raise
             if res is not None:
-                request.setHeader('content-type', res[0])
-                request.setHeader('content-length', len(res[1]))
+                request.setHeader(b'content-type', res[0])
+                request.setHeader(b'content-length', unicode2bytes(str(len(res[1]))))
                 request.write(res[1])
                 return
         raise resource.Redirect(self.defaultAvatarUrl)

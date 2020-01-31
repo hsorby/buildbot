@@ -7,19 +7,21 @@ This section gives some general information about Buildbot development.
     :maxdepth: 2
 
     master-overview
-    definitions
     style
-    coffeescript-style
     tests
     config
     schedulers
     utils
     results
-    formats
-    www
+    www-server
+    www-data-module
+    www-base-app
     auth
-    master-slave
+    authz
+    master-worker
     br-claiming
     encodings
     metrics
+    secrets
+    stats-service
     plugins-publish

@@ -19,8 +19,9 @@ Result specifications are applied in the following order:
  * Filters
  * Order
  * Pagination (limit/offset)
+ * Properties
 
-Only fields are applied to non-collection results.
+Only fields & properties are applied to non-collection results.
 Endpoints processing a result specification should take care to replicate this behavior.
 
 .. py:class:: ResultSpec
@@ -50,10 +51,19 @@ Endpoints processing a result specification should take care to replicate this b
 
         The 0-based index of the first collection item to return.
 
+   .. py:attribute:: properties
+
+        A list of :py:class:`Property` instances to be applied.
+        The result is a logical AND of all properties.
+
     All of the attributes can be supplied as constructor keyword arguments.
 
     Endpoint implementations may call these methods to indicate that they have processed part of the result spec.
     A subsequent call to :py:meth:`apply` will then not waste time re-applying that part.
+
+    .. py:method:: popProperties()
+
+        If a property exists, return its values list and remove it from the result spec.
 
     .. py:method:: popFilter(field, op)
 
@@ -63,6 +73,15 @@ Endpoints processing a result specification should take care to replicate this b
 
         If a filter exists for the field, remove it and return the expected value (True or False); otherwise return None.
         This method correctly handles odd cases like ``field__ne=false``.
+
+    .. py:method:: popStringFilter(field)
+
+        If one string filter exists for the field, remove it and return the expected value (as string); otherwise return None.
+
+    .. py:method:: popIntegerFilter(field)
+
+        If one integer filter exists for the field, remove it and return the expected value (as integer); otherwise return None.
+        raises ValueError if the field is not convertible to integer.
 
     .. py:method:: removePagination()
 
@@ -97,4 +116,12 @@ Endpoints processing a result specification should take care to replicate this b
 
     Many operators, such as "gt", only accept one value.
     Others, such as "eq" or "ne", can accept multiple values.
+    In either case, the values must be passed as a list.
+
+.. py:class:: Property(values)
+
+    :param list values: the values on the right side of the operator (``eq``)
+
+    A property represents an item of a foreign table.
+
     In either case, the values must be passed as a list.

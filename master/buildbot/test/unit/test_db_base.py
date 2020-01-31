@@ -13,24 +13,29 @@
 #
 # Copyright Buildbot Team Members
 
+
 import hashlib
-import mock
+
 import sqlalchemy as sa
+
+import mock
+
+from twisted.internet import defer
+from twisted.trial import unittest
 
 from buildbot.db import base
 from buildbot.test.fake import fakedb
 from buildbot.test.util import connector_component
-from twisted.internet import defer
-from twisted.trial import unittest
+from buildbot.util import sautils
 
 
 class TestBase(unittest.TestCase):
 
     def setUp(self):
         meta = sa.MetaData()
-        self.tbl = sa.Table('tbl', meta,
-                            sa.Column('str32', sa.String(length=32)),
-                            sa.Column('txt', sa.Text))
+        self.tbl = sautils.Table('tbl', meta,
+                                 sa.Column('str32', sa.String(length=32)),
+                                 sa.Column('txt', sa.Text))
         self.db = mock.Mock()
         self.db.pool.engine.dialect.name = 'mysql'
         self.comp = base.DBConnectorComponent(self.db)
@@ -39,12 +44,21 @@ class TestBase(unittest.TestCase):
         self.comp.checkLength(self.tbl.c.str32, "short string")
 
     def test_checkLength_long(self):
-        self.assertRaises(RuntimeError, lambda:
-                          self.comp.checkLength(self.tbl.c.str32, "long string" * 5))
+        with self.assertRaises(RuntimeError):
+            self.comp.checkLength(self.tbl.c.str32, ("long string" * 5))
+
+    def test_ensureLength_ok(self):
+        v = self.comp.ensureLength(self.tbl.c.str32, "short string")
+        self.assertEqual(v, "short string")
+
+    def test_ensureLength_long(self):
+        v = self.comp.ensureLength(self.tbl.c.str32, "short string" * 5)
+        self.assertEqual(v, "short stringshordacf5a81f8ae3873")
+        self.comp.checkLength(self.tbl.c.str32, v)
 
     def test_checkLength_text(self):
-        self.assertRaises(AssertionError, lambda:
-                          self.comp.checkLength(self.tbl.c.txt, "long string" * 5))
+        with self.assertRaises(AssertionError):
+            self.comp.checkLength(self.tbl.c.txt, ("long string" * 5))
 
     def test_checkLength_long_not_mysql(self):
         self.db.pool.engine.dialect.name = 'sqlite'
@@ -57,42 +71,40 @@ class TestBase(unittest.TestCase):
 
     def test_hashColumns_single(self):
         self.assertEqual(self.comp.hashColumns('master'),
-                         self._sha1('master'))
+                         self._sha1(b'master'))
 
     def test_hashColumns_multiple(self):
         self.assertEqual(self.comp.hashColumns('a', None, 'b', 1),
-                         self._sha1('a\0\xf5\x00b\x001'))
+                         self._sha1(b'a\0\xf5\x00b\x001'))
 
     def test_hashColumns_None(self):
         self.assertEqual(self.comp.hashColumns(None),
-                         self._sha1('\xf5'))
+                         self._sha1(b'\xf5'))
 
     def test_hashColumns_integer(self):
         self.assertEqual(self.comp.hashColumns(11),
-                         self._sha1('11'))
+                         self._sha1(b'11'))
 
     def test_hashColumns_unicode_ascii_match(self):
         self.assertEqual(self.comp.hashColumns('master'),
-                         self.comp.hashColumns(u'master'))
+                         self.comp.hashColumns('master'))
 
 
 class TestBaseAsConnectorComponent(unittest.TestCase,
                                    connector_component.ConnectorComponentMixin):
 
+    @defer.inlineCallbacks
     def setUp(self):
         # this co-opts the masters table to test findSomethingId
-        d = self.setUpConnectorComponent(
+        yield self.setUpConnectorComponent(
             table_names=['masters'])
 
-        @d.addCallback
-        def finish_setup(_):
-            self.db.base = base.DBConnectorComponent(self.db)
-        return d
+        self.db.base = base.DBConnectorComponent(self.db)
 
     @defer.inlineCallbacks
     def test_findSomethingId_race(self):
         tbl = self.db.model.masters
-        hash = hashlib.sha1('somemaster').hexdigest()
+        hash = hashlib.sha1(b'somemaster').hexdigest()
 
         def race_thd(conn):
             conn.execute(tbl.insert(),
@@ -109,7 +121,7 @@ class TestBaseAsConnectorComponent(unittest.TestCase,
     @defer.inlineCallbacks
     def test_findSomethingId_new(self):
         tbl = self.db.model.masters
-        hash = hashlib.sha1('somemaster').hexdigest()
+        hash = hashlib.sha1(b'somemaster').hexdigest()
         id = yield self.db.base.findSomethingId(
             tbl=self.db.model.masters,
             whereclause=(tbl.c.name_hash == hash),
@@ -120,7 +132,7 @@ class TestBaseAsConnectorComponent(unittest.TestCase,
     @defer.inlineCallbacks
     def test_findSomethingId_existing(self):
         tbl = self.db.model.masters
-        hash = hashlib.sha1('somemaster').hexdigest()
+        hash = hashlib.sha1(b'somemaster').hexdigest()
 
         yield self.insertTestData([
             fakedb.Master(id=7, name='somemaster', name_hash=hash),
@@ -132,6 +144,17 @@ class TestBaseAsConnectorComponent(unittest.TestCase,
             insert_values=dict(name='somemaster', name_hash=hash,
                                active=1, last_active=1))
         self.assertEqual(id, 7)
+
+    @defer.inlineCallbacks
+    def test_findSomethingId_new_noCreate(self):
+        tbl = self.db.model.masters
+        hash = hashlib.sha1(b'somemaster').hexdigest()
+        id = yield self.db.base.findSomethingId(
+            tbl=self.db.model.masters,
+            whereclause=(tbl.c.name_hash == hash),
+            insert_values=dict(name='somemaster', name_hash=hash,
+                               active=1, last_active=1), autoCreate=False)
+        self.assertEqual(id, None)
 
 
 class TestCachedDecorator(unittest.TestCase):

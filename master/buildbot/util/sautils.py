@@ -13,8 +13,10 @@
 #
 # Copyright Buildbot Team Members
 
-import sqlalchemy as sa
 
+from contextlib import contextmanager
+
+import sqlalchemy as sa
 from sqlalchemy.ext import compiler
 from sqlalchemy.sql.expression import ClauseElement
 from sqlalchemy.sql.expression import Executable
@@ -50,3 +52,31 @@ def sa_version():
                 return -1
         return tuple(map(tryint, sa.__version__.split('.')))
     return (0, 0, 0)  # "it's old"
+
+
+def Table(*args, **kwargs):
+    """Wrap table creation to add any necessary dialect-specific options"""
+    # work around the case where a database was created for us with
+    # a non-utf8 character set (mysql's default)
+    kwargs['mysql_character_set'] = 'utf8'
+    return sa.Table(*args, **kwargs)
+
+
+@contextmanager
+def withoutSqliteForeignKeys(engine, connection=None):
+    conn = connection
+    if engine.dialect.name == 'sqlite':
+        if conn is None:
+            conn = engine.connect()
+        # This context is not re-entrant. Ensure it.
+        assert not getattr(engine, 'fk_disabled', False)
+        engine.fk_disabled = True
+        conn.execute('pragma foreign_keys=OFF')
+    try:
+        yield
+    finally:
+        if engine.dialect.name == 'sqlite':
+            engine.fk_disabled = False
+            conn.execute('pragma foreign_keys=ON')
+            if connection is None:
+                conn.close()

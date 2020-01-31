@@ -13,7 +13,11 @@
 #
 # Copyright Buildbot Team Members
 
+
 import mock
+
+from twisted.internet import defer
+from twisted.trial import unittest
 
 from buildbot.data import builds
 from buildbot.data import resultspec
@@ -21,10 +25,8 @@ from buildbot.test.fake import fakedb
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import endpoint
 from buildbot.test.util import interfaces
+from buildbot.test.util.misc import TestReactorMixin
 from buildbot.util import epoch2datetime
-from twisted.internet import defer
-from twisted.internet import reactor
-from twisted.trial import unittest
 
 
 class BuildEndpoint(endpoint.EndpointMixin, unittest.TestCase):
@@ -35,16 +37,16 @@ class BuildEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def setUp(self):
         self.setUpEndpoint()
         self.db.insertTestData([
-            fakedb.Builder(id=77),
+            fakedb.Builder(id=77, name='builder77'),
             fakedb.Master(id=88),
-            fakedb.Buildslave(id=13, name='sl'),
+            fakedb.Worker(id=13, name='wrk'),
             fakedb.Buildset(id=8822),
-            fakedb.BuildRequest(id=82, buildsetid=8822),
-            fakedb.Build(id=13, builderid=77, masterid=88, buildslaveid=13,
+            fakedb.BuildRequest(id=82, buildsetid=8822, builderid=77),
+            fakedb.Build(id=13, builderid=77, masterid=88, workerid=13,
                          buildrequestid=82, number=3),
-            fakedb.Build(id=14, builderid=77, masterid=88, buildslaveid=13,
+            fakedb.Build(id=14, builderid=77, masterid=88, workerid=13,
                          buildrequestid=82, number=4),
-            fakedb.Build(id=15, builderid=77, masterid=88, buildslaveid=13,
+            fakedb.Build(id=15, builderid=77, masterid=88, workerid=13,
                          buildrequestid=82, number=5),
         ])
 
@@ -78,6 +80,48 @@ class BuildEndpoint(endpoint.EndpointMixin, unittest.TestCase):
         self.validateData(build)
         self.assertEqual(build['buildid'], 15)
 
+    @defer.inlineCallbacks
+    def test_get_buildername_number(self):
+        build = yield self.callGet(('builders', 'builder77', 'builds', 5))
+        self.validateData(build)
+        self.assertEqual(build['buildid'], 15)
+
+    @defer.inlineCallbacks
+    def test_get_buildername_not_existing_number(self):
+        build = yield self.callGet(('builders', 'builder77_nope', 'builds', 5))
+        self.assertEqual(build, None)
+
+    @defer.inlineCallbacks
+    def test_properties_injection(self):
+        resultSpec = resultspec.OptimisedResultSpec(
+            filters=[resultspec.Filter('property', 'eq', [False])])
+        build = yield self.callGet(('builders', 77, 'builds', 5), resultSpec=resultSpec)
+        self.validateData(build)
+        self.assertIn('properties', build)
+
+    @defer.inlineCallbacks
+    def test_action_stop(self):
+        yield self.callControl("stop", {}, ('builders', 77, 'builds', 5))
+        self.master.mq.assertProductions(
+            [(('control', 'builds', '15', 'stop'), {'reason': 'no reason'})])
+
+    @defer.inlineCallbacks
+    def test_action_stop_reason(self):
+        yield self.callControl("stop", {'reason': 'because'}, ('builders', 77, 'builds', 5))
+        self.master.mq.assertProductions(
+            [(('control', 'builds', '15', 'stop'), {'reason': 'because'})])
+
+    @defer.inlineCallbacks
+    def test_action_rebuild(self):
+        self.patch(self.master.data.updates, "rebuildBuildrequest",
+                   mock.Mock(spec=self.master.data.updates.rebuildBuildrequest, return_value=(1, [2])))
+        r = yield self.callControl("rebuild", {}, ('builders', 77, 'builds', 5))
+        self.assertEqual(r, (1, [2]))
+
+        buildrequest = yield self.master.data.get(('buildrequests', 82))
+        self.master.data.updates.rebuildBuildrequest.assert_called_with(
+            buildrequest)
+
 
 class BuildsEndpoint(endpoint.EndpointMixin, unittest.TestCase):
 
@@ -87,17 +131,21 @@ class BuildsEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def setUp(self):
         self.setUpEndpoint()
         self.db.insertTestData([
-            fakedb.Builder(id=77),
+            fakedb.Builder(id=77, name='builder77'),
+            fakedb.Builder(id=78, name='builder78'),
+            fakedb.Builder(id=79, name='builder79'),
             fakedb.Master(id=88),
-            fakedb.Buildslave(id=13, name='sl'),
+            fakedb.Worker(id=13, name='wrk'),
             fakedb.Buildset(id=8822),
             fakedb.BuildRequest(id=82, buildsetid=8822),
-            fakedb.Build(id=13, builderid=77, masterid=88, buildslaveid=13,
+            fakedb.Build(id=13, builderid=77, masterid=88, workerid=13,
                          buildrequestid=82, number=3),
-            fakedb.Build(id=14, builderid=77, masterid=88, buildslaveid=13,
+            fakedb.Build(id=14, builderid=77, masterid=88, workerid=13,
                          buildrequestid=82, number=4),
-            fakedb.Build(id=15, builderid=78, masterid=88, buildslaveid=13,
+            fakedb.Build(id=15, builderid=78, masterid=88, workerid=12,
                          buildrequestid=83, number=5, complete_at=1),
+            fakedb.Build(id=16, builderid=79, masterid=88, workerid=12,
+                         buildrequestid=84, number=6, complete_at=1),
         ])
 
     def tearDown(self):
@@ -108,7 +156,7 @@ class BuildsEndpoint(endpoint.EndpointMixin, unittest.TestCase):
         builds = yield self.callGet(('builds',))
         [self.validateData(build) for build in builds]
         self.assertEqual(sorted([b['number'] for b in builds]),
-                         [3, 4, 5])
+                         [3, 4, 5, 6])
 
     @defer.inlineCallbacks
     def test_get_builder(self):
@@ -117,44 +165,109 @@ class BuildsEndpoint(endpoint.EndpointMixin, unittest.TestCase):
         self.assertEqual(sorted([b['number'] for b in builds]), [5])
 
     @defer.inlineCallbacks
+    def test_get_buildername(self):
+        builds = yield self.callGet(('builders', 'builder78', 'builds'))
+        [self.validateData(build) for build in builds]
+        self.assertEqual(sorted([b['number'] for b in builds]), [5])
+
+    @defer.inlineCallbacks
+    def test_get_buildername_not_existing(self):
+        builds = yield self.callGet(('builders', 'builder78_nope', 'builds'))
+        self.assertEqual(builds, [])
+
+    @defer.inlineCallbacks
     def test_get_buildrequest(self):
         builds = yield self.callGet(('buildrequests', 82, 'builds'))
         [self.validateData(build) for build in builds]
         self.assertEqual(sorted([b['number'] for b in builds]), [3, 4])
 
     @defer.inlineCallbacks
-    def test_get_complete(self):
-        # override resultSpec implementation to be noop
-        class MyResultSpec(resultspec.ResultSpec):
+    def test_get_buildrequest_not_existing(self):
+        builds = yield self.callGet(('buildrequests', 899, 'builds'))
+        self.assertEqual(builds, [])
 
-            def apply(self, data):
-                return data
-
-        resultSpec = MyResultSpec(
-            filters=[resultspec.Filter('complete', 'eq', [False])])
-
-        builds = yield self.callGet(('builds',),
-                                    resultSpec=resultSpec)
+    @defer.inlineCallbacks
+    def test_get_buildrequest_via_filter(self):
+        resultSpec = resultspec.OptimisedResultSpec(
+            filters=[resultspec.Filter('buildrequestid', 'eq', [82])])
+        builds = yield self.callGet(('builds',), resultSpec=resultSpec)
         [self.validateData(build) for build in builds]
         self.assertEqual(sorted([b['number'] for b in builds]), [3, 4])
 
+    @defer.inlineCallbacks
+    def test_get_buildrequest_via_filter_with_string(self):
+        resultSpec = resultspec.OptimisedResultSpec(
+            filters=[resultspec.Filter('buildrequestid', 'eq', ['82'])])
+        builds = yield self.callGet(('builds',), resultSpec=resultSpec)
+        [self.validateData(build) for build in builds]
+        self.assertEqual(sorted([b['number'] for b in builds]), [3, 4])
 
-class Build(interfaces.InterfaceTests, unittest.TestCase):
+    @defer.inlineCallbacks
+    def test_get_worker(self):
+        builds = yield self.callGet(('workers', 13, 'builds'))
+        [self.validateData(build) for build in builds]
+        self.assertEqual(sorted([b['number'] for b in builds]), [3, 4])
+
+    @defer.inlineCallbacks
+    def test_get_complete(self):
+        resultSpec = resultspec.OptimisedResultSpec(
+            filters=[resultspec.Filter('complete', 'eq', [False])])
+        builds = yield self.callGet(('builds',), resultSpec=resultSpec)
+        [self.validateData(build) for build in builds]
+        self.assertEqual(sorted([b['number'] for b in builds]), [3, 4])
+
+    @defer.inlineCallbacks
+    def test_get_complete_at(self):
+        resultSpec = resultspec.OptimisedResultSpec(
+            filters=[resultspec.Filter('complete_at', 'eq', [None])])
+        builds = yield self.callGet(('builds',), resultSpec=resultSpec)
+        [self.validateData(build) for build in builds]
+        self.assertEqual(sorted([b['number'] for b in builds]), [3, 4])
+
+    @defer.inlineCallbacks
+    def test_properties_injection(self):
+        resultSpec = resultspec.OptimisedResultSpec(
+            filters=[resultspec.Filter('property', 'eq', [False])])
+        builds = yield self.callGet(('builds',), resultSpec=resultSpec)
+        for b in builds:
+            self.validateData(b)
+            self.assertIn('properties', b)
+
+    @defer.inlineCallbacks
+    def test_get_filter_eq(self):
+        resultSpec = resultspec.OptimisedResultSpec(
+            filters=[resultspec.Filter('builderid', 'eq', [78, 79])])
+        builds = yield self.callGet(('builds',), resultSpec=resultSpec)
+        [self.validateData(b) for b in builds]
+        self.assertEqual(sorted([b['number'] for b in builds]), [5, 6])
+
+    @defer.inlineCallbacks
+    def test_get_filter_ne(self):
+        resultSpec = resultspec.OptimisedResultSpec(
+            filters=[resultspec.Filter('builderid', 'ne', [78, 79])])
+        builds = yield self.callGet(('builds',), resultSpec=resultSpec)
+        [self.validateData(b) for b in builds]
+        self.assertEqual(sorted([b['number'] for b in builds]), [3, 4])
+
+
+class Build(interfaces.InterfaceTests, TestReactorMixin, unittest.TestCase):
     new_build_event = {'builderid': 10,
                        'buildid': 100,
                        'buildrequestid': 13,
-                       'buildslaveid': 20,
+                       'workerid': 20,
                        'complete': False,
                        'complete_at': None,
                        'masterid': 824,
                        'number': 1,
                        'results': None,
                        'started_at': epoch2datetime(1),
-                       'state_string': u'created'}
+                       'state_string': 'created',
+                       'properties': {}}
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self,
-                                             wantMq=True, wantDb=True, wantData=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=True, wantDb=True,
+                                             wantData=True)
         self.rtype = builds.Build(self.master)
 
     @defer.inlineCallbacks
@@ -168,31 +281,42 @@ class Build(interfaces.InterfaceTests, unittest.TestCase):
         m.assert_called_with(*(exp_args or args), **(exp_kwargs or kwargs))
 
     @defer.inlineCallbacks
-    def do_test_event(self, method, exp_events=[],
+    def do_test_event(self, method, exp_events=None,
                       *args, **kwargs):
-        self.patch(reactor, "seconds", lambda: 1)
+        self.reactor.advance(1)
+        if exp_events is None:
+            exp_events = []
         yield method(*args, **kwargs)
         self.master.mq.assertProductions(exp_events)
 
     def test_signature_newBuild(self):
         @self.assertArgSpecMatches(
-            self.master.data.updates.newBuild,  # fake
-            self.rtype.newBuild)  # real
-        def newBuild(self, builderid, buildrequestid, buildslaveid):
+            self.master.data.updates.addBuild,  # fake
+            self.rtype.addBuild)  # real
+        def newBuild(self, builderid, buildrequestid, workerid):
             pass
 
     def test_newBuild(self):
-        return self.do_test_callthrough('addBuild', self.rtype.newBuild,
-                                        builderid=10, buildrequestid=13, buildslaveid=20,
+        return self.do_test_callthrough('addBuild', self.rtype.addBuild,
+                                        builderid=10, buildrequestid=13, workerid=20,
                                         exp_kwargs=dict(builderid=10, buildrequestid=13,
-                                                        buildslaveid=20, masterid=self.master.masterid,
-                                                        state_string=u'created'))
+                                                        workerid=20, masterid=self.master.masterid,
+                                                        state_string='created'))
 
     def test_newBuildEvent(self):
-        return self.do_test_event(self.rtype.newBuild,
-                                  builderid=10, buildrequestid=13, buildslaveid=20,
+
+        @defer.inlineCallbacks
+        def addBuild(*args, **kwargs):
+            buildid, _ = yield self.rtype.addBuild(*args, **kwargs)
+            yield self.rtype.generateNewBuildEvent(buildid)
+            return None
+
+        return self.do_test_event(addBuild,
+                                  builderid=10, buildrequestid=13, workerid=20,
                                   exp_events=[(('builders', '10', 'builds', '1', 'new'), self.new_build_event),
-                                              (('builds', '100', 'new'), self.new_build_event)])
+                                              (('builds', '100', 'new'),
+                                               self.new_build_event),
+                                              (('workers', '20', 'builds', '100', 'new'), self.new_build_event)])
 
     def test_signature_setBuildStateString(self):
         @self.assertArgSpecMatches(
@@ -204,7 +328,7 @@ class Build(interfaces.InterfaceTests, unittest.TestCase):
     def test_setBuildStateString(self):
         return self.do_test_callthrough('setBuildStateString',
                                         self.rtype.setBuildStateString,
-                                        buildid=10, state_string=u'a b')
+                                        buildid=10, state_string='a b')
 
     def test_signature_finishBuild(self):
         @self.assertArgSpecMatches(

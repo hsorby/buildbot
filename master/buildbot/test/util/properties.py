@@ -13,12 +13,14 @@
 #
 # Copyright Buildbot Team Members
 
+
+from zope.interface import implementer
+
 from buildbot.interfaces import IRenderable
-from zope.interface import implements
 
 
-class ConstantRenderable(object):
-    implements(IRenderable)
+@implementer(IRenderable)
+class ConstantRenderable:
 
     def __init__(self, value):
         self.value = value

@@ -15,12 +15,13 @@
 
 import mock
 
-from buildbot import config
-from buildbot.test.util import compat
-from buildbot.util import service
 from twisted.internet import defer
 from twisted.internet import task
 from twisted.trial import unittest
+
+from buildbot import config
+from buildbot.process.properties import Interpolate
+from buildbot.util import service
 
 
 class DeferredStartStop(service.AsyncService):
@@ -44,9 +45,10 @@ class AsyncMultiService(unittest.TestCase):
         yield self.svc.startService()
         yield self.svc.stopService()
 
+    @defer.inlineCallbacks
     def test_waits_for_child_services(self):
         child = DeferredStartStop()
-        child.setServiceParent(self.svc)
+        yield child.setServiceParent(self.svc)
 
         d = self.svc.startService()
         self.assertFalse(d.called)
@@ -58,9 +60,10 @@ class AsyncMultiService(unittest.TestCase):
         child.d.callback(None)
         self.assertTrue(d.called)
 
+    @defer.inlineCallbacks
     def test_child_fails(self):
         child = DeferredStartStop()
-        child.setServiceParent(self.svc)
+        yield child.setServiceParent(self.svc)
 
         d = self.svc.startService()
         self.assertFalse(d.called)
@@ -91,11 +94,11 @@ class AsyncMultiService(unittest.TestCase):
         self.assertTrue(d.called)
 
 
-class ClusteredService(unittest.TestCase):
+class ClusteredBuildbotService(unittest.TestCase):
     SVC_NAME = 'myName'
     SVC_ID = 20
 
-    class DummyService(service.ClusteredService):
+    class DummyService(service.ClusteredBuildbotService):
         pass
 
     def setUp(self):
@@ -141,16 +144,16 @@ class ClusteredService(unittest.TestCase):
         svc.deactivate = self.makeMock(deactivate)
 
     def test_name_PreservesUnicodePromotion(self):
-        svc = self.makeService(name=u'n')
+        svc = self.makeService(name='n')
 
-        self.assertIsInstance(svc.name, unicode)
-        self.assertEqual(svc.name, u'n')
+        self.assertIsInstance(svc.name, str)
+        self.assertEqual(svc.name, 'n')
 
     def test_name_GetsUnicodePromotion(self):
         svc = self.makeService(name='n')
 
-        self.assertIsInstance(svc.name, unicode)
-        self.assertEqual(svc.name, u'n')
+        self.assertIsInstance(svc.name, str)
+        self.assertEqual(svc.name, 'n')
 
     def test_compare(self):
         a = self.makeService(name='a', serviceid=20)
@@ -212,8 +215,9 @@ class ClusteredService(unittest.TestCase):
 
         self.assertFalse(self.svc.isActive())
 
+    @defer.inlineCallbacks
     def test_start_PollButClaimFails(self):
-        self.svc.startService()
+        yield self.svc.startService()
 
         # at the POLL time, it gets called again, but we're still inactive...
         self.svc.clock.advance(self.svc.POLL_INTERVAL_SEC * 1.05)
@@ -236,7 +240,8 @@ class ClusteredService(unittest.TestCase):
             self.svc.clock.advance(self.svc.POLL_INTERVAL_SEC)
 
         self.assertEqual(1, self.svc._getServiceId.call_count)
-        self.assertEqual(1 + NUMBER_OF_POLLS, self.svc._claimService.call_count)
+        self.assertEqual(
+            1 + NUMBER_OF_POLLS, self.svc._claimService.call_count)
 
     def test_start_ClaimSucceeds(self):
         self.setServiceClaimable(self.svc, defer.succeed(True))
@@ -257,7 +262,7 @@ class ClusteredService(unittest.TestCase):
 
         self.svc.startService()
 
-        # another epoch shouldnt do anything further...
+        # another epoch shouldn't do anything further...
         self.svc.clock.advance(self.svc.POLL_INTERVAL_SEC * 2)
 
         self.assertEqual(1, self.svc.activate.call_count)
@@ -493,7 +498,6 @@ class ClusteredService(unittest.TestCase):
         self.assertEqual(1, self.svc._unclaimService.call_count)
         self.assertEqual(False, self.svc.isActive())
 
-    @compat.usesFlushLoggedErrors
     def test_claim_raises(self):
         self.setServiceClaimable(self.svc, RuntimeError())
 
@@ -502,18 +506,17 @@ class ClusteredService(unittest.TestCase):
         self.assertEqual(1, len(self.flushLoggedErrors(RuntimeError)))
         self.assertEqual(False, self.svc.isActive())
 
-    @compat.usesFlushLoggedErrors
+    @defer.inlineCallbacks
     def test_activate_raises(self):
         self.setServiceClaimable(self.svc, defer.succeed(True))
         self.setActivateToReturn(self.svc, RuntimeError())
 
-        self.svc.startService()
+        yield self.svc.startService()
 
         self.assertEqual(1, len(self.flushLoggedErrors(RuntimeError)))
         # half-active: we actually return True in this case:
         self.assertEqual(True, self.svc.isActive())
 
-    @compat.usesFlushLoggedErrors
     def test_deactivate_raises(self):
         self.setServiceClaimable(self.svc, defer.succeed(True))
         self.setDeactivateToReturn(self.svc, RuntimeError())
@@ -524,7 +527,6 @@ class ClusteredService(unittest.TestCase):
         self.assertEqual(1, len(self.flushLoggedErrors(RuntimeError)))
         self.assertEqual(False, self.svc.isActive())
 
-    @compat.usesFlushLoggedErrors
     def test_unclaim_raises(self):
         self.setServiceClaimable(self.svc, defer.succeed(True))
         self.setUnclaimToReturn(self.svc, RuntimeError())
@@ -548,33 +550,39 @@ class MyService(service.BuildbotService):
         return defer.succeed(None)
 
 
-class fakeConfig(object):
+class fakeConfig:
     pass
 
 
-class fakeMaster(service.AsyncMultiService, service.ReconfigurableServiceMixin):
+class fakeMaster(service.MasterService, service.ReconfigurableServiceMixin):
     pass
+
+
+def makeFakeMaster():
+    m = fakeMaster()
+    m.db = mock.Mock()
+    return m
 
 
 class BuildbotService(unittest.TestCase):
 
     def setUp(self):
-        self.master = fakeMaster()
+        self.master = makeFakeMaster()
 
     @defer.inlineCallbacks
     def prepareService(self):
         self.master.config = fakeConfig()
         serv = MyService(1, a=2, name="basic")
-        self.master.config.services = {"basic": serv}
         yield serv.setServiceParent(self.master)
         yield self.master.startService()
-        yield self.master.reconfigServiceWithBuildbotConfig(self.master.config)
-        defer.returnValue(serv)
+        yield serv.reconfigServiceWithSibling(serv)
+        return serv
 
     @defer.inlineCallbacks
     def testNominal(self):
         yield self.prepareService()
-        self.assertEqual(self.master.namedServices["basic"].config, ((1,), dict(a=2)))
+        self.assertEqual(
+            self.master.namedServices["basic"].config, ((1,), dict(a=2)))
 
     @defer.inlineCallbacks
     def testConfigDict(self):
@@ -584,6 +592,37 @@ class BuildbotService(unittest.TestCase):
             'class': 'buildbot.test.unit.test_util_service.MyService',
             'kwargs': {'a': 2},
             'name': 'basic'})
+
+    def testNoName(self):
+        with self.assertRaises(ValueError):
+            MyService(1, a=2)
+
+    def testChecksDone(self):
+        with self.assertRaises(config.ConfigErrors):
+            MyService(1, name="foo")
+
+
+class BuildbotServiceManager(unittest.TestCase):
+
+    def setUp(self):
+        self.master = makeFakeMaster()
+
+    @defer.inlineCallbacks
+    def prepareService(self):
+        self.master.config = fakeConfig()
+        serv = MyService(1, a=2, name="basic")
+        self.master.config.services = {"basic": serv}
+        self.manager = service.BuildbotServiceManager()
+        yield self.manager.setServiceParent(self.master)
+        yield self.master.startService()
+        yield self.master.reconfigServiceWithBuildbotConfig(self.master.config)
+        return serv
+
+    @defer.inlineCallbacks
+    def testNominal(self):
+        yield self.prepareService()
+        self.assertEqual(
+            self.manager.namedServices["basic"].config, ((1,), dict(a=2)))
 
     @defer.inlineCallbacks
     def testReconfigNoChange(self):
@@ -596,9 +635,9 @@ class BuildbotService(unittest.TestCase):
         # reconfigure the master
         yield self.master.reconfigServiceWithBuildbotConfig(self.master.config)
         # the first service is still used
-        self.assertIdentical(self.master.namedServices["basic"], serv)
+        self.assertIdentical(self.manager.namedServices["basic"], serv)
         # the second service is not used
-        self.assertNotIdentical(self.master.namedServices["basic"], serv2)
+        self.assertNotIdentical(self.manager.namedServices["basic"], serv2)
 
         # reconfigServiceWithConstructorArgs was not called
         self.assertEqual(serv.config, None)
@@ -608,22 +647,158 @@ class BuildbotService(unittest.TestCase):
         serv = yield self.prepareService()
         serv.config = None  # 'de-configure' the service
 
-        # reconfigure with the differnt config
+        # reconfigure with the different config
         serv2 = MyService(1, a=4, name="basic")
         self.master.config.services = {"basic": serv2}
 
         # reconfigure the master
         yield self.master.reconfigServiceWithBuildbotConfig(self.master.config)
         # the first service is still used
-        self.assertIdentical(self.master.namedServices["basic"], serv)
+        self.assertIdentical(self.manager.namedServices["basic"], serv)
         # the second service is not used
-        self.assertNotIdentical(self.master.namedServices["basic"], serv2)
+        self.assertNotIdentical(self.manager.namedServices["basic"], serv2)
 
         # reconfigServiceWithConstructorArgs was called with new config
         self.assertEqual(serv.config, ((1,), dict(a=4)))
 
     def testNoName(self):
-        self.assertRaises(ValueError, lambda: MyService(1, a=2))
+        with self.assertRaises(ValueError):
+            MyService(1, a=2)
 
     def testChecksDone(self):
-        self.assertRaises(config.ConfigErrors, lambda: MyService(1, name="foo"))
+        with self.assertRaises(config.ConfigErrors):
+            MyService(1, name="foo")
+
+    @defer.inlineCallbacks
+    def testReconfigWithNew(self):
+        serv = yield self.prepareService()
+
+        # reconfigure with the new service
+        serv2 = MyService(1, a=4, name="basic2")
+        self.master.config.services['basic2'] = serv2
+
+        # the second service is not there yet
+        self.assertIdentical(self.manager.namedServices.get("basic2"), None)
+
+        # reconfigure the master
+        yield self.master.reconfigServiceWithBuildbotConfig(self.master.config)
+
+        # the first service is still used
+        self.assertIdentical(self.manager.namedServices["basic"], serv)
+        # the second service is created
+        self.assertIdentical(self.manager.namedServices["basic2"], serv2)
+
+        # reconfigServiceWithConstructorArgs was called with new config
+        self.assertEqual(serv2.config, ((1,), dict(a=4)))
+
+    @defer.inlineCallbacks
+    def testReconfigWithDeleted(self):
+        serv = yield self.prepareService()
+        self.assertEqual(serv.running, True)
+
+        # remove all
+        self.master.config.services = {}
+
+        # reconfigure the master
+        yield self.master.reconfigServiceWithBuildbotConfig(self.master.config)
+
+        # the first service is still used
+        self.assertIdentical(self.manager.namedServices.get("basic"), None)
+        self.assertEqual(serv.running, False)
+
+    @defer.inlineCallbacks
+    def testConfigDict(self):
+        yield self.prepareService()
+        self.assertEqual(self.manager.getConfigDict(), {
+            'childs': [{
+                'args': (1,),
+                'class': 'buildbot.test.unit.test_util_service.MyService',
+                'kwargs': {'a': 2},
+                'name': 'basic'}],
+            'name': 'services'})
+
+    @defer.inlineCallbacks
+    def testRenderSecrets(self):
+        yield self.prepareService()
+        service = self.manager.namedServices['basic']
+        test = yield service.renderSecrets(Interpolate('test_string'))
+        self.assertEqual(test, 'test_string')
+
+    @defer.inlineCallbacks
+    def testRenderSecrets2Args(self):
+        yield self.prepareService()
+        service = self.manager.namedServices['basic']
+        test, test2 = yield service.renderSecrets(Interpolate('test_string'), 'ok_for_non_renderable')
+        self.assertEqual(test, 'test_string')
+        self.assertEqual(test2, 'ok_for_non_renderable')
+
+    @defer.inlineCallbacks
+    def testRenderSecretsWithTuple(self):
+        yield self.prepareService()
+        service = self.manager.namedServices['basic']
+        test = yield service.renderSecrets(('user', Interpolate('test_string')))
+        self.assertEqual(test, ('user', 'test_string'))
+
+
+class UnderTestSharedService(service.SharedService):
+    def __init__(self, arg1=None):
+        super().__init__()
+
+
+class UnderTestDependentService(service.AsyncService):
+    @defer.inlineCallbacks
+    def startService(self):
+        self.dependent = yield UnderTestSharedService.getService(self.parent)
+
+    def stopService(self):
+        assert self.dependent.running
+
+
+class SharedService(unittest.TestCase):
+    @defer.inlineCallbacks
+    def test_bad_constructor(self):
+        parent = service.AsyncMultiService()
+        with self.assertRaises(Exception):
+            yield UnderTestSharedService.getService(parent, arg2="foo")
+
+    @defer.inlineCallbacks
+    def test_creation(self):
+        parent = service.AsyncMultiService()
+        r = yield UnderTestSharedService.getService(parent)
+        r2 = yield UnderTestSharedService.getService(parent)
+        r3 = yield UnderTestSharedService.getService(parent, "arg1")
+        r4 = yield UnderTestSharedService.getService(parent, "arg1")
+        self.assertIdentical(r, r2)
+        self.assertNotIdentical(r, r3)
+        self.assertIdentical(r3, r4)
+        self.assertEqual(len(list(iter(parent))), 2)
+
+    @defer.inlineCallbacks
+    def test_startup(self):
+        """the service starts when parent starts and stop"""
+        parent = service.AsyncMultiService()
+        r = yield UnderTestSharedService.getService(parent)
+        self.assertEqual(r.running, 0)
+        yield parent.startService()
+        self.assertEqual(r.running, 1)
+        yield parent.stopService()
+        self.assertEqual(r.running, 0)
+
+    @defer.inlineCallbacks
+    def test_already_started(self):
+        """the service starts during the getService if parent already started"""
+        parent = service.AsyncMultiService()
+        yield parent.startService()
+        r = yield UnderTestSharedService.getService(parent)
+        self.assertEqual(r.running, 1)
+        # then we stop the parent, and the shared service stops
+        yield parent.stopService()
+        self.assertEqual(r.running, 0)
+
+    @defer.inlineCallbacks
+    def test_already_stopped_last(self):
+        parent = service.AsyncMultiService()
+        o = UnderTestDependentService()
+        yield o.setServiceParent(parent)
+        yield parent.startService()
+        yield parent.stopService()

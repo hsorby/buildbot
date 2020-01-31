@@ -13,11 +13,13 @@
 #
 # Copyright Buildbot Team Members
 
+
 import sqlalchemy as sa
+
+from twisted.internet import defer
 
 from buildbot.db import NULL
 from buildbot.db import base
-from twisted.internet import defer
 
 
 class ChangeSourceAlreadyClaimedError(Exception):
@@ -38,6 +40,7 @@ class ChangeSourcesConnectorComponent(base.DBConnectorComponent):
                 name_hash=name_hash,
             ))
 
+    # returns a Deferred that returns None
     def setChangeSourceMaster(self, changesourceid, masterid):
         def thd(conn):
             cs_mst_tbl = self.db.model.changesource_masters
@@ -64,8 +67,9 @@ class ChangeSourcesConnectorComponent(base.DBConnectorComponent):
     def getChangeSource(self, changesourceid):
         cs = yield self.getChangeSources(_changesourceid=changesourceid)
         if cs:
-            defer.returnValue(cs[0])
+            return cs[0]
 
+    # returns a Deferred that returns a value
     def getChangeSources(self, active=None, masterid=None, _changesourceid=None):
         def thd(conn):
             cs_tbl = self.db.model.changesources

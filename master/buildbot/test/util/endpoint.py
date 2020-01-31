@@ -13,19 +13,19 @@
 #
 # Copyright Buildbot Team Members
 
-import mock
-import types
+
+from twisted.internet import defer
 
 from buildbot.data import base
 from buildbot.data import resultspec
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import interfaces
 from buildbot.test.util import validation
+from buildbot.test.util.misc import TestReactorMixin
 from buildbot.util import pathmatch
-from twisted.internet import defer
 
 
-class EndpointMixin(interfaces.InterfaceTests):
+class EndpointMixin(TestReactorMixin, interfaces.InterfaceTests):
     # test mixin for testing Endpoint subclasses
 
     # class being tested
@@ -36,8 +36,9 @@ class EndpointMixin(interfaces.InterfaceTests):
     resourceTypeClass = None
 
     def setUpEndpoint(self):
-        self.master = fakemaster.make_master(wantMq=True, wantDb=True,
-                                             wantData=True, testcase=self)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=True, wantDb=True,
+                                             wantData=True)
         self.db = self.master.db
         self.mq = self.master.mq
         self.data = self.master.data
@@ -62,7 +63,7 @@ class EndpointMixin(interfaces.InterfaceTests):
             self.matcher[pp] = self.ep
 
         self.pathArgs = [
-            set([arg.split(':', 1)[1] for arg in pp if ':' in arg])
+            {arg.split(':', 1)[1] for arg in pp if ':' in arg}
             for pp in pathPatterns if pp is not None]
 
     def tearDownEndpoint(self):
@@ -73,36 +74,25 @@ class EndpointMixin(interfaces.InterfaceTests):
 
     # call methods, with extra checks
 
+    @defer.inlineCallbacks
     def callGet(self, path, resultSpec=None):
         self.assertIsInstance(path, tuple)
         if resultSpec is None:
             resultSpec = resultspec.ResultSpec()
         endpoint, kwargs = self.matcher[path]
         self.assertIdentical(endpoint, self.ep)
-        d = endpoint.get(resultSpec, kwargs)
-        self.assertIsInstance(d, defer.Deferred)
+        rv = yield endpoint.get(resultSpec, kwargs)
 
-        @d.addCallback
-        def checkNumber(rv):
-            if self.ep.isCollection:
-                self.assertIsInstance(rv, (list, base.ListResult))
-            else:
-                self.assertIsInstance(rv, (dict, types.NoneType))
-            return rv
-        return d
+        if self.ep.isCollection:
+            self.assertIsInstance(rv, (list, base.ListResult))
+        else:
+            self.assertIsInstance(rv, (dict, type(None)))
+        return rv
 
-    @defer.inlineCallbacks
-    def callStartConsuming(self, options, kwargs, expected_filter=None):
-        self.assertIn(set(kwargs), self.pathArgs)
-        cb = mock.Mock()
-        qref = yield self.ep.startConsuming(cb, options, kwargs)
-        self.assertTrue(hasattr(qref, 'stopConsuming'))
-        self.assertIdentical(self.mq.qrefs[0], qref)
-        self.assertIdentical(qref.callback, cb)
-        self.assertEqual(qref.filter, expected_filter)
-
-    def callControl(self, action, args, kwargs):
-        self.assertIn(set(kwargs), self.pathArgs)
+    def callControl(self, action, args, path):
+        self.assertIsInstance(path, tuple)
+        endpoint, kwargs = self.matcher[path]
+        self.assertIdentical(endpoint, self.ep)
         d = self.ep.control(action, args, kwargs)
         self.assertIsInstance(d, defer.Deferred)
         return d
@@ -114,12 +104,16 @@ class EndpointMixin(interfaces.InterfaceTests):
         def get(self, resultSpec, kwargs):
             pass
 
-    def test_startConsuming_spec(self):
-        @self.assertArgSpecMatches(self.ep.startConsuming)
-        def startConsuming(self, callback, options, kwargs):
-            pass
-
     def test_control_spec(self):
         @self.assertArgSpecMatches(self.ep.control)
         def control(self, action, args, kwargs):
             pass
+
+    def test_rootLinkName(self):
+        rootLinkName = self.ep.rootLinkName
+        if not rootLinkName:
+            return
+        try:
+            self.assertEqual(self.matcher[(rootLinkName,)][0], self.ep)
+        except KeyError:
+            self.fail('No match for rootlink: ' + rootLinkName)

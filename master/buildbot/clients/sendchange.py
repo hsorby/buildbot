@@ -13,23 +13,28 @@
 #
 # Copyright Buildbot Team Members
 
-
 from twisted.cred import credentials
 from twisted.internet import reactor
 from twisted.spread import pb
+
+from buildbot.util import unicode2bytes
 
 
 class Sender:
 
     def __init__(self, master, auth=('change', 'changepw'), encoding='utf8'):
-        self.username, self.password = auth
+        self.username = unicode2bytes(auth[0])
+        self.password = unicode2bytes(auth[1])
         self.host, self.port = master.split(":")
         self.port = int(self.port)
         self.encoding = encoding
 
     def send(self, branch, revision, comments, files, who=None, category=None,
-             when=None, properties={}, repository='', vc=None, project='',
+             when=None, properties=None, repository='', vc=None, project='',
              revlink='', codebase=None):
+        if properties is None:
+            properties = {}
+
         change = {'project': project, 'repository': repository, 'who': who,
                   'files': files, 'comments': comments, 'branch': branch,
                   'revision': revision, 'category': category, 'when': when,
@@ -41,21 +46,21 @@ class Sender:
             change['codebase'] = codebase
 
         for key in change:
-            if isinstance(change[key], str):
+            if isinstance(change[key], bytes):
                 change[key] = change[key].decode(self.encoding, 'replace')
         change['files'] = list(change['files'])
         for i, file in enumerate(change.get('files', [])):
-            if isinstance(file, str):
+            if isinstance(file, bytes):
                 change['files'][i] = file.decode(self.encoding, 'replace')
 
         f = pb.PBClientFactory()
         d = f.login(credentials.UsernamePassword(self.username, self.password))
         reactor.connectTCP(self.host, self.port, f)
 
+        @d.addCallback
         def call_addChange(remote):
             d = remote.callRemote('addChange', change)
             d.addCallback(lambda res: remote.broker.transport.loseConnection())
             return d
-        d.addCallback(call_addChange)
 
         return d

@@ -13,7 +13,12 @@
 #
 # Copyright Buildbot Team Members
 
+
 import mock
+
+from twisted.internet import defer
+from twisted.python import reflect
+from twisted.trial import unittest
 
 from buildbot.data import base
 from buildbot.data import connector
@@ -22,9 +27,7 @@ from buildbot.data import resultspec
 from buildbot.data import types
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import interfaces
-from twisted.internet import defer
-from twisted.python import reflect
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
 class Tests(interfaces.InterfaceTests):
@@ -43,11 +46,6 @@ class Tests(interfaces.InterfaceTests):
         def getEndpoint(self, path):
             pass
 
-    def test_signature_startConsuming(self):
-        @self.assertArgSpecMatches(self.data.startConsuming)
-        def startConsuming(self, callback, options, path):
-            pass
-
     def test_signature_control(self):
         @self.assertArgSpecMatches(self.data.control)
         def control(self, action, args, path):
@@ -55,10 +53,10 @@ class Tests(interfaces.InterfaceTests):
 
     def test_signature_updates_addChange(self):
         @self.assertArgSpecMatches(self.data.updates.addChange)
-        def addChange(self, files=None, comments=None, author=None,
+        def addChange(self, files=None, comments=None, author=None, committer=None,
                       revision=None, when_timestamp=None, branch=None, category=None,
-                      revlink=u'', properties={}, repository=u'', codebase=None,
-                      project=u'', src=None):
+                      revlink='', properties=None, repository='', codebase=None,
+                      project='', src=None):
             pass
 
     def test_signature_updates_masterActive(self):
@@ -73,8 +71,8 @@ class Tests(interfaces.InterfaceTests):
 
     def test_signature_updates_addBuildset(self):
         @self.assertArgSpecMatches(self.data.updates.addBuildset)
-        def addBuildset(self, waited_for, scheduler=None, sourcestamps=[],
-                        reason='', properties={}, builderids=[],
+        def addBuildset(self, waited_for, scheduler=None, sourcestamps=None,
+                        reason='', properties=None, builderids=None,
                         external_idstring=None,
                         parent_buildid=None, parent_relationship=None):
             pass
@@ -90,29 +88,35 @@ class Tests(interfaces.InterfaceTests):
             pass
 
 
-class TestFakeData(unittest.TestCase, Tests):
+class TestFakeData(TestReactorMixin, unittest.TestCase, Tests):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self,
-                                             wantMq=True, wantData=True, wantDb=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=True, wantData=True,
+                                             wantDb=True)
         self.data = self.master.data
 
 
-class TestDataConnector(unittest.TestCase, Tests):
+class TestDataConnector(TestReactorMixin, unittest.TestCase, Tests):
 
+    @defer.inlineCallbacks
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self,
-                                             wantMq=True)
-        self.data = connector.DataConnector(self.master)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=True)
+        self.data = connector.DataConnector()
+        yield self.data.setServiceParent(self.master)
 
 
-class DataConnector(unittest.TestCase):
+class DataConnector(TestReactorMixin, unittest.TestCase):
 
+    @defer.inlineCallbacks
     def setUp(self):
-        self.master = fakemaster.make_master()
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self)
         # don't load by default
         self.patch(connector.DataConnector, 'submodules', [])
-        self.data = connector.DataConnector(self.master)
+        self.data = connector.DataConnector()
+        yield self.data.setServiceParent(self.master)
 
     def patchFooPattern(self):
         cls = type('FooEndpoint', (base.Endpoint,), {})
@@ -172,68 +176,49 @@ class DataConnector(unittest.TestCase):
         self.assertEqual(got, (ep, {'fooid': 10}))
 
     def test_getEndpoint_missing(self):
-        self.assertRaises(exceptions.InvalidPathError, lambda:
-                          self.data.getEndpoint(('xyz',)))
+        with self.assertRaises(exceptions.InvalidPathError):
+            self.data.getEndpoint(('xyz',))
 
+    @defer.inlineCallbacks
     def test_get(self):
         ep = self.patchFooPattern()
-        d = self.data.get(('foo', '10', 'bar'))
+        gotten = yield self.data.get(('foo', '10', 'bar'))
 
-        @d.addCallback
-        def check(gotten):
-            self.assertEqual(gotten, {'val': 9999})
-            ep.get.assert_called_once_with(mock.ANY, {'fooid': 10})
-        return d
+        self.assertEqual(gotten, {'val': 9999})
+        ep.get.assert_called_once_with(mock.ANY, {'fooid': 10})
 
+    @defer.inlineCallbacks
     def test_get_filters(self):
         ep = self.patchFooListPattern()
-        d = self.data.get(('foo',),
+        gotten = yield self.data.get(('foo',),
                           filters=[resultspec.Filter('val', 'lt', [902])])
 
-        @d.addCallback
-        def check(gotten):
-            self.assertEqual(gotten, base.ListResult(
-                [{'val': 900}, {'val': 901}], total=2))
-            ep.get.assert_called_once_with(mock.ANY, {})
-        return d
+        self.assertEqual(gotten, base.ListResult(
+            [{'val': 900}, {'val': 901}], total=2))
+        ep.get.assert_called_once_with(mock.ANY, {})
 
+    @defer.inlineCallbacks
     def test_get_resultSpec_args(self):
         ep = self.patchFooListPattern()
         f = resultspec.Filter('val', 'gt', [909])
-        d = self.data.get(('foo',), filters=[f], fields=['val'],
+        gotten = yield self.data.get(('foo',), filters=[f], fields=['val'],
                           order=['-val'], limit=2)
 
-        @d.addCallback
-        def check(gotten):
-            self.assertEqual(gotten, base.ListResult(
-                [{'val': 919}, {'val': 918}], total=10, limit=2))
-            ep.get.assert_called_once_with(mock.ANY, {})
-        return d
+        self.assertEqual(gotten, base.ListResult(
+            [{'val': 919}, {'val': 918}], total=10, limit=2))
+        ep.get.assert_called_once_with(mock.ANY, {})
 
     @defer.inlineCallbacks
-    def test_startConsuming(self):
-        ep = self.patchFooPattern()
-        ep.startConsuming = mock.Mock(name='MyEndpoint.startConsuming')
-        ep.startConsuming.return_value = defer.succeed('qref')
-
-        # since startConsuming is a mock, there's no need for real mq stuff
-        qref = yield self.data.startConsuming('cb', {}, ('foo', '10', 'bar'))
-        self.assertEqual(qref, 'qref')
-        ep.startConsuming.assert_called_with('cb', {}, dict(fooid=10))
-
     def test_control(self):
         ep = self.patchFooPattern()
-        ep.control = mock.Mock(name='MyEndpoint.startConsuming')
+        ep.control = mock.Mock(name='MyEndpoint.control')
         ep.control.return_value = defer.succeed('controlled')
 
-        d = self.data.control('foo!', {'arg': 2}, ('foo', '10', 'bar'))
+        gotten = yield self.data.control('foo!', {'arg': 2}, ('foo', '10', 'bar'))
 
-        @d.addCallback
-        def check(gotten):
-            self.assertEqual(gotten, 'controlled')
-            ep.control.assert_called_once_with('foo!', {'arg': 2},
-                                               {'fooid': 10})
-        return d
+        self.assertEqual(gotten, 'controlled')
+        ep.control.assert_called_once_with('foo!', {'arg': 2},
+                                           {'fooid': 10})
 
 # classes discovered by test_scanModule, above
 

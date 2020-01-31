@@ -13,21 +13,23 @@
 #
 # Copyright Buildbot Team Members
 
-from __future__ import with_statement
-
 import os
 import sys
 import time
-import twisted
 
-from buildbot.scripts import start
-from buildbot.test.util import compat
-from buildbot.test.util import dirs
-from buildbot.test.util import misc
-from buildbot.test.util.flaky import flaky
+import mock
+
+import twisted
+from twisted.internet import defer
 from twisted.internet.utils import getProcessOutputAndValue
 from twisted.python import versions
 from twisted.trial import unittest
+
+from buildbot.scripts import start
+from buildbot.test.util import dirs
+from buildbot.test.util import misc
+from buildbot.test.util.decorators import flaky
+from buildbot.test.util.decorators import skipUnlessPlatformIs
 
 
 def mkconfig(**kwargs):
@@ -39,6 +41,7 @@ def mkconfig(**kwargs):
     config.update(kwargs)
     return config
 
+
 fake_master_tac = """\
 from twisted.application import service
 from twisted.internet import reactor
@@ -46,7 +49,7 @@ from twisted.python import log
 application = service.Application('highscore')
 class App(service.Service):
     def startService(self):
-        service.Service.startService(self)
+        super().startService()
         log.msg("BuildMaster is running") # heh heh heh
         reactor.callLater(0, reactor.stop)
 app = App()
@@ -75,51 +78,58 @@ class TestStart(misc.StdoutAssertionsMixin, dirs.DirsMixin, unittest.TestCase):
     def runStart(self, **config):
         args = [
             '-c',
-            'from buildbot.scripts.start import start; start(%r)' % (mkconfig(**config),),
+            'from buildbot.scripts.start import start; import sys; '
+            'sys.exit(start(%r))' % (
+                mkconfig(**config),),
         ]
         env = os.environ.copy()
         env['PYTHONPATH'] = os.pathsep.join(sys.path)
         return getProcessOutputAndValue(sys.executable, args=args, env=env)
 
+    @defer.inlineCallbacks
     def test_start_no_daemon(self):
-        d = self.runStart(nodaemon=True)
+        (_, err, rc) = yield self.runStart(nodaemon=True)
 
-        @d.addCallback
-        def cb(res):
-            self.assertEquals(res, ('', '', 0))
-            print res
-        return d
+        self.assertEqual((err, rc), (b'', 0))
 
+    @defer.inlineCallbacks
     def test_start_quiet(self):
-        d = self.runStart(quiet=True)
+        res = yield self.runStart(quiet=True)
 
-        @d.addCallback
-        def cb(res):
-            self.assertEquals(res, ('', '', 0))
-            print res
-        return d
+        self.assertEqual(res, (b'', b'', 0))
+
+    @skipUnlessPlatformIs('posix')
+    @defer.inlineCallbacks
+    def test_start_timeout_nonnumber(self):
+        (out, err, rc) = yield self.runStart(start_timeout='a')
+
+        self.assertEqual((rc, err), (1, b''))
+        self.assertSubstring(b'Start timeout must be a number\n', out)
+
+    @skipUnlessPlatformIs('posix')
+    @defer.inlineCallbacks
+    def test_start_timeout_number_string(self):
+        # integer values from command-line options come in as strings
+        res = yield self.runStart(start_timeout='10')
+
+        self.assertEqual(res, (mock.ANY, b'', 0))
 
     @flaky(bugNumber=2760)
-    @compat.skipUnlessPlatformIs('posix')
+    @skipUnlessPlatformIs('posix')
+    @defer.inlineCallbacks
     def test_start(self):
-        d = self.runStart()
+        try:
+            (out, err, rc) = yield self.runStart()
 
-        @d.addCallback
-        def cb(xxx_todo_changeme):
-            (out, err, rc) = xxx_todo_changeme
-            self.assertEqual((rc, err), (0, ''))
-            self.assertSubstring('BuildMaster is running', out)
-
-        @d.addBoth
-        def flush(x):
+            self.assertEqual((rc, err), (0, b''))
+            self.assertSubstring(
+                'buildmaster appears to have (re)started correctly', out)
+        finally:
             # wait for the pidfile to go away after the reactor.stop
             # in buildbot.tac takes effect
             pidfile = os.path.join('basedir', 'twistd.pid')
             while os.path.exists(pidfile):
                 time.sleep(0.01)
-            return x
-
-        return d
 
     if twisted.version <= versions.Version('twisted', 9, 0, 0):
         test_start.skip = test_start_quiet.skip = "Skipping due to suprious PotentialZombieWarning."

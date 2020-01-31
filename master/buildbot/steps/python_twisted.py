@@ -12,26 +12,21 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+"""
+BuildSteps that are specific to the Twisted source tree
+"""
 
+
+import re
 
 from twisted.python import log
 
 from buildbot.process import logobserver
-from buildbot.status import testresult
-from buildbot.status.results import FAILURE
-from buildbot.status.results import SKIPPED
-from buildbot.status.results import SUCCESS
-from buildbot.status.results import WARNINGS
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SKIPPED
+from buildbot.process.results import SUCCESS
+from buildbot.process.results import WARNINGS
 from buildbot.steps.shell import ShellCommand
-
-try:
-    import cStringIO
-    StringIO = cStringIO
-except ImportError:
-    import StringIO
-import re
-
-# BuildSteps that are specific to the Twisted source tree
 
 
 class HLint(ShellCommand):
@@ -51,7 +46,7 @@ class HLint(ShellCommand):
     warnings = 0
 
     def __init__(self, python=None, **kwargs):
-        ShellCommand.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.python = python
         self.warningLines = []
         self.addLogObserver(
@@ -77,7 +72,7 @@ class HLint(ShellCommand):
         # add an extra log file to show the .html files we're checking
         self.addCompleteLog("files", "\n".join(self.hlintFiles) + "\n")
 
-        ShellCommand.start(self)
+        super().start()
 
     def logConsumer(self):
         while True:
@@ -108,7 +103,7 @@ class TrialTestCaseCounter(logobserver.LogLineObserver):
     _line_re = re.compile(r'^(?:Doctest: )?([\w\.]+) \.\.\. \[([^\]]+)\]$')
 
     def __init__(self):
-        logobserver.LogLineObserver.__init__(self)
+        super().__init__()
         self.numTests = 0
         self.finished = False
         self.counts = {'total': None,
@@ -168,6 +163,7 @@ class TrialTestCaseCounter(logobserver.LogLineObserver):
             if out:
                 self.counts['successes'] = int(out.group(1))
 
+
 UNSPECIFIED = ()  # since None is a valid choice
 
 
@@ -181,8 +177,8 @@ class Trial(ShellCommand):
 
     name = "trial"
     progressMetrics = ('output', 'tests', 'test.log')
-    # note: the slash only works on unix buildslaves, of course, but we have
-    # no way to know what the buildslave uses as a separator.
+    # note: the slash only works on unix workers, of course, but we have
+    # no way to know what the worker uses as a separator.
     # TODO: figure out something clever.
     logfiles = {"test.log": "_trial_temp/test.log"}
     # we use test.log to track Progress at the end of __init__()
@@ -287,7 +283,7 @@ class Trial(ShellCommand):
                        warnOnWarnings, warnOnFailure, want_stdout, want_stderr,
                        timeout.
         """
-        ShellCommand.__init__(self, **kwargs)
+        super().__init__(**kwargs)
 
         if python:
             self.python = python
@@ -378,14 +374,14 @@ class Trial(ShellCommand):
         self.text = 'running'
 
     def setupEnvironment(self, cmd):
-        ShellCommand.setupEnvironment(self, cmd)
+        super().setupEnvironment(cmd)
         if self.testpath is not None:
             e = cmd.args['env']
             if e is None:
                 cmd.args['env'] = {'PYTHONPATH': self.testpath}
             else:
                 # this bit produces a list, which can be used
-                # by buildslave.runprocess.RunProcess
+                # by buildbot_worker.runprocess.RunProcess
                 ppath = e.get('PYTHONPATH', self.testpath)
                 if isinstance(ppath, str):
                     ppath = [ppath]
@@ -404,8 +400,9 @@ class Trial(ShellCommand):
 
             # using -j/--jobs flag produces more than one test log.
             self.logfiles = {}
-            for i in xrange(self.jobs):
-                self.logfiles['test.%d.log' % i] = '_trial_temp/%d/test.log' % i
+            for i in range(self.jobs):
+                self.logfiles['test.%d.log' %
+                              i] = '_trial_temp/%d/test.log' % i
                 self.logfiles['err.%d.log' % i] = '_trial_temp/%d/err.log' % i
                 self.logfiles['out.%d.log' % i] = '_trial_temp/%d/out.log' % i
                 self.addLogObserver('test.%d.log' % i, output_observer)
@@ -423,7 +420,7 @@ class Trial(ShellCommand):
             self.command.extend(self.tests)
         log.msg("Trial.start: command is", self.command)
 
-        ShellCommand.start(self)
+        super().start()
 
     def commandComplete(self, cmd):
         # figure out all status, then let the various hook functions return
@@ -479,12 +476,12 @@ class Trial(ShellCommand):
                         (counts['expectedFailures'],
                          counts['expectedFailures'] == 1 and "todo"
                          or "todos"))
-            if 0:  # TODO
+            if 0:  # TODO  pylint: disable=using-constant-test
                 results = WARNINGS
                 if not text2:
                     text2 = "todo"
 
-        if 0:
+        if 0:  # pylint: disable=using-constant-test
             # ignore unexpectedSuccesses for now, but it should really mark
             # the build WARNING
             if counts['unexpectedSuccesses']:
@@ -507,13 +504,6 @@ class Trial(ShellCommand):
             rtext = fmt % self.reactor
             return rtext.replace("reactor", "")
         return ""
-
-    def addTestResult(self, testname, results, text, tlog):
-        if self.reactor is not None:
-            testname = (self.reactor,) + testname
-        tr = testresult.TestResult(testname, results, text, logs={'log': tlog})
-        # self.step_status.build.addTestResult(tr)
-        self.build.build_status.addTestResult(tr)
 
     def logConsumer(self):
         while True:
@@ -543,53 +533,6 @@ class Trial(ShellCommand):
 
         if problems:
             self.addCompleteLog("problems", problems)
-            # now parse the problems for per-test results
-            pio = StringIO.StringIO(problems)
-            pio.readline()  # eat the first separator line
-            testname = None
-            done = False
-            while not done:
-                while True:
-                    line = pio.readline()
-                    if line == "":
-                        done = True
-                        break
-                    if line.find("=" * 60) == 0:
-                        break
-                    if line.find("-" * 60) == 0:
-                        # the last case has --- as a separator before the
-                        # summary counts are printed
-                        done = True
-                        break
-                    if testname is None:
-                        # the first line after the === is like:
-                        # EXPECTED FAILURE: testLackOfTB (twisted.test.test_failure.FailureTestCase)
-                        # SKIPPED: testRETR (twisted.test.test_ftp.TestFTPServer)
-                        # FAILURE: testBatchFile (twisted.conch.test.test_sftp.TestOurServerBatchFile)
-                        r = re.search(r'^([^:]+): (\w+) \(([\w\.]+)\)', line)
-                        if not r:
-                            # TODO: cleanup, if there are no problems,
-                            # we hit here
-                            continue
-                        result, name, case = r.groups()
-                        testname = tuple(case.split(".") + [name])
-                        results = {'SKIPPED': SKIPPED,
-                                   'EXPECTED FAILURE': SUCCESS,
-                                   'UNEXPECTED SUCCESS': WARNINGS,
-                                   'FAILURE': FAILURE,
-                                   'ERROR': FAILURE,
-                                   'SUCCESS': SUCCESS,  # not reported
-                                   }.get(result, WARNINGS)
-                        text = result.lower().split()
-                        loog = line
-                        # the next line is all dashes
-                        loog += pio.readline()
-                    else:
-                        # the rest goes into the log
-                        loog += line
-                if testname:
-                    self.addTestResult(testname, results, text, loog)
-                    testname = None
 
         if warnings:
             lines = sorted(warnings.keys())
@@ -604,6 +547,6 @@ class Trial(ShellCommand):
 
 class RemovePYCs(ShellCommand):
     name = "remove-.pyc"
-    command = ['find', '.', '-name', '*.pyc', '-exec', 'rm', '{}', ';']
+    command = ['find', '.', '-name', "'*.pyc'", '-exec', 'rm', '{}', ';']
     description = ["removing", ".pyc", "files"]
     descriptionDone = ["remove", ".pycs"]

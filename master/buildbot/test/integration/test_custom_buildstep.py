@@ -13,27 +13,29 @@
 #
 # Copyright Buildbot Team Members
 
+import traceback
+
 import mock
 
-from StringIO import StringIO
+from twisted.internet import defer
+from twisted.internet import error
+from twisted.python import failure
+from twisted.python.compat import NativeStringIO
+from twisted.trial import unittest
 
 from buildbot import config
-from buildbot.buildslave.base import BuildSlave
 from buildbot.process import builder
 from buildbot.process import buildrequest
 from buildbot.process import buildstep
 from buildbot.process import factory
-from buildbot.process import slavebuilder
-from buildbot.status import results
+from buildbot.process import results
+from buildbot.process import workerforbuilder
 from buildbot.steps import shell
 from buildbot.test.fake import fakedb
 from buildbot.test.fake import fakemaster
 from buildbot.test.fake import fakeprotocol
-from twisted.internet import defer
-from twisted.internet import error
-from twisted.internet import reactor
-from twisted.python import failure
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
+from buildbot.worker.base import Worker
 
 
 class TestLogObserver(buildstep.LogObserver):
@@ -47,15 +49,16 @@ class TestLogObserver(buildstep.LogObserver):
 
 class OldStyleCustomBuildStep(buildstep.BuildStep):
 
-    def __init__(self, arg1, arg2, doFail=False, **kwargs):
-        buildstep.BuildStep.__init__(self, **kwargs)
+    def __init__(self, reactor, arg1, arg2, doFail=False, **kwargs):
+        super().__init__(**kwargs)
+        self.reactor = reactor
         self.arg1 = arg1
         self.arg2 = arg2
         self.doFail = doFail
 
     def start(self):
         # don't complete immediately, or synchronously
-        reactor.callLater(0, self.doStuff)
+        self.reactor.callLater(0, self.doStuff)
 
     def doStuff(self):
         try:
@@ -70,11 +73,11 @@ class OldStyleCustomBuildStep(buildstep.BuildStep):
             lo = TestLogObserver()
             self.addLogObserver('foo', lo)
 
-            l = self.addLog('foo')
-            l.addStdout('stdout\n')
-            l.addStdout(u'\N{SNOWMAN}\n'.encode('utf-8'))
-            l.addStderr('stderr\n')
-            l.finish()
+            _log = self.addLog('foo')
+            _log.addStdout('stdout\n')
+            _log.addStdout('\N{SNOWMAN}\n'.encode('utf-8'))
+            _log.addStderr('stderr\n')
+            _log.finish()
 
             self.addCompleteLog('obs', 'Observer saw %r' % (lo.observed,))
 
@@ -82,20 +85,20 @@ class OldStyleCustomBuildStep(buildstep.BuildStep):
                 self.failed(failure.Failure(RuntimeError('oh noes')))
             else:
                 self.finished(results.SUCCESS)
-        except Exception, e:
-            import traceback
+        except Exception:
             traceback.print_exc()
-            self.failed(failure.Failure(e))
+            self.failed(failure.Failure())
 
 
 class Latin1ProducingCustomBuildStep(buildstep.BuildStep):
 
     @defer.inlineCallbacks
     def run(self):
-        l = yield self.addLog('xx')
-        yield l.addStdout(u'\N{CENT SIGN}'.encode('latin-1'))
-        yield l.finish()
-        defer.returnValue(results.SUCCESS)
+        _log = yield self.addLog('xx')
+        output_str = '\N{CENT SIGN}'
+        yield _log.addStdout(output_str)
+        yield _log.finish()
+        return results.SUCCESS
 
 
 class FailingCustomStep(buildstep.LoggingBuildStep):
@@ -103,7 +106,7 @@ class FailingCustomStep(buildstep.LoggingBuildStep):
     flunkOnFailure = True
 
     def __init__(self, exception=buildstep.BuildStepFailed, *args, **kwargs):
-        buildstep.LoggingBuildStep.__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.exception = exception
 
     @defer.inlineCallbacks
@@ -117,13 +120,13 @@ class OldBuildEPYDoc(shell.ShellCommand):
     command = ['epydoc']
 
     def runCommand(self, cmd):
-        # we don't have a real buildslave in this test harness, so fake it
-        l = cmd.logs['stdio']
-        l.addStdout('some\noutput\n')
+        # we don't have a real worker in this test harness, so fake it
+        _log = cmd.logs['stdio']
+        _log.addStdout('some\noutput\n')
         return defer.succeed(None)
 
     def createSummary(self, log):
-        for line in StringIO(log.getText()):
+        for line in NativeStringIO(log.getText()):
             # what we do with the line isn't important to the test
             assert line in ('some\n', 'output\n')
 
@@ -133,60 +136,66 @@ class OldPerlModuleTest(shell.Test):
     command = ['perl']
 
     def runCommand(self, cmd):
-        # we don't have a real buildslave in this test harness, so fake it
-        l = cmd.logs['stdio']
-        l.addStdout('a\nb\nc\n')
+        # we don't have a real worker in this test harness, so fake it
+        _log = cmd.logs['stdio']
+        _log.addStdout('a\nb\nc\n')
         return defer.succeed(None)
 
     def evaluateCommand(self, cmd):
         # Get stdio, stripping pesky newlines etc.
-        lines = map(
-            lambda line: line.replace('\r\n', '').replace('\r', '').replace('\n', ''),
-            self.getLog('stdio').readlines()
-        )
-        # .. the rest of this method isn't htat interesting, as long as the
+        lines = [
+            line.replace('\r\n', '').replace('\r', '').replace('\n', '')
+            for line in self.getLog('stdio').readlines()
+        ]
+        # .. the rest of this method isn't that interesting, as long as the
         # statement above worked
         assert lines == ['a', 'b', 'c']
         return results.SUCCESS
 
 
-class RunSteps(unittest.TestCase):
+class RunSteps(unittest.TestCase, TestReactorMixin):
 
     @defer.inlineCallbacks
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self,
-                                             wantData=True, wantMq=True, wantDb=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantData=True,
+                                             wantMq=True, wantDb=True)
         self.master.db.insertTestData([
             fakedb.Builder(id=80, name='test'), ])
 
-        self.builder = builder.Builder('test', _addServices=False)
+        self.builder = builder.Builder('test')
         self.builder._builderid = 80
+        self.builder.config_version = 0
         self.builder.master = self.master
+        self.builder.botmaster = mock.Mock()
+        self.builder.botmaster.getLockFromLockAccesses = lambda l, c: []
         yield self.builder.startService()
 
         self.factory = factory.BuildFactory()  # will have steps added later
         new_config = config.MasterConfig()
         new_config.builders.append(
-            config.BuilderConfig(name='test', slavename='testsl',
+            config.BuilderConfig(name='test', workername='testworker',
                                  factory=self.factory))
         yield self.builder.reconfigServiceWithBuildbotConfig(new_config)
 
-        self.slave = BuildSlave('bsl', 'pass')
-        self.slave.sendBuilderList = lambda: defer.succeed(None)
-        self.slave.botmaster = mock.Mock()
-        self.slave.botmaster.maybeStartBuildsForSlave = lambda sl: None
-        self.slave.master = self.master
-        self.slave.startService()
-        self.conn = fakeprotocol.FakeConnection(self.master, self.slave)
-        yield self.slave.attached(self.conn)
+        self.worker = Worker('worker', 'pass')
+        self.worker.sendBuilderList = lambda: defer.succeed(None)
+        self.worker.parent = mock.Mock()
+        self.worker.master.botmaster = mock.Mock()
+        self.worker.botmaster.maybeStartBuildsForWorker = lambda w: None
+        self.worker.botmaster.getBuildersForWorker = lambda w: []
+        self.worker.parent = self.master
+        self.worker.startService()
+        self.conn = fakeprotocol.FakeConnection(self.master, self.worker)
+        yield self.worker.attached(self.conn)
 
-        sb = self.slavebuilder = slavebuilder.SlaveBuilder()
-        sb.setBuilder(self.builder)
-        yield sb.attached(self.slave, {})
+        wfb = self.workerforbuilder = workerforbuilder.WorkerForBuilder()
+        wfb.setBuilder(self.builder)
+        yield wfb.attached(self.worker, {})
 
         # add the buildset/request
         self.bsid, brids = yield self.master.db.buildsets.addBuildset(
-            sourcestamps=[{}], reason=u'x', properties={},
+            sourcestamps=[{}], reason='x', properties={},
             builderids=[80], waited_for=False)
 
         self.brdict = \
@@ -195,8 +204,10 @@ class RunSteps(unittest.TestCase):
         self.buildrequest = \
             yield buildrequest.BuildRequest.fromBrdict(self.master, self.brdict)
 
+    @defer.inlineCallbacks
     def tearDown(self):
-        return self.builder.stopService()
+        yield self.worker.stopService()
+        yield self.builder.stopService()
 
     @defer.inlineCallbacks
     def do_test_step(self):
@@ -210,31 +221,31 @@ class RunSteps(unittest.TestCase):
         self.builder.buildFinished = buildFinished
 
         # start the builder
-        self.failUnless((yield self.builder.maybeStartBuild(
-            self.slavebuilder, [self.buildrequest])))
+        self.assertTrue((yield self.builder.maybeStartBuild(
+            self.workerforbuilder, [self.buildrequest])))
 
         # and wait for completion
         yield bfd
 
         # then get the BuildStatus and return it
-        defer.returnValue(self.master.status.lastBuilderStatus.lastBuildStatus)
+        return self.master.status.lastBuilderStatus.lastBuildStatus
 
     def assertLogs(self, exp_logs):
         got_logs = {}
-        for id, l in self.master.data.updates.logs.iteritems():
-            self.failUnless(l['finished'])
+        for id, l in self.master.data.updates.logs.items():
+            self.assertTrue(l['finished'])
             got_logs[l['name']] = ''.join(l['content'])
         self.assertEqual(got_logs, exp_logs)
 
     @defer.inlineCallbacks
     def doOldStyleCustomBuildStep(self, slowDB=False):
-        # patch out newLog to delay until we're ready
+        # patch out addLog to delay until we're ready
         newLogDeferreds = []
-        oldNewLog = self.master.data.updates.newLog
+        oldNewLog = self.master.data.updates.addLog
 
         def finishNewLog(self):
             for d in newLogDeferreds:
-                reactor.callLater(0, d.callback, None)
+                self.reactor.callLater(0, d.callback, None)
 
         def delayedNewLog(*args, **kwargs):
             d = defer.Deferred()
@@ -243,25 +254,27 @@ class RunSteps(unittest.TestCase):
             return d
         if slowDB:
             self.patch(self.master.data.updates,
-                       "newLog", delayedNewLog)
+                       "addLog", delayedNewLog)
             self.patch(OldStyleCustomBuildStep,
                        "_run_finished_hook", finishNewLog)
 
-        self.factory.addStep(OldStyleCustomBuildStep(arg1=1, arg2=2))
+        self.factory.addStep(OldStyleCustomBuildStep(self.reactor,
+                                                     arg1=1, arg2=2))
         yield self.do_test_step()
 
         self.assertLogs({
-            u'compl.html': u'<blink>A very short logfile</blink>\n',
+            'compl.html': '<blink>A very short logfile</blink>\n',
             # this is one of the things that differs independently of
             # new/old style: encoding of logs and newlines
-            u'foo':
+            'foo':
             # 'stdout\n\xe2\x98\x83\nstderr\n',
-            u'ostdout\no\N{SNOWMAN}\nestderr\n',
-            u'obs':
-            # if slowDB, the observer wont see anything before the end of this instant step
-            u'Observer saw []\n' if slowDB else
+            'ostdout\no\N{SNOWMAN}\nestderr\n',
+            'obs':
+            # if slowDB, the observer won't see anything before the end of this
+            # instant step
+            'Observer saw []\n' if slowDB else
             # 'Observer saw [\'stdout\\n\', \'\\xe2\\x98\\x83\\n\']',
-            u'Observer saw [u\'stdout\\n\', u\'\\u2603\\n\']\n',
+            'Observer saw [' + repr('stdout\n') + ", " + repr("\u2603\n") + "]\n"
         })
 
     def test_OldStyleCustomBuildStep(self):
@@ -272,7 +285,8 @@ class RunSteps(unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_OldStyleCustomBuildStep_failure(self):
-        self.factory.addStep(OldStyleCustomBuildStep(arg1=1, arg2=2, doFail=1))
+        self.factory.addStep(OldStyleCustomBuildStep(self.reactor,
+                                                     arg1=1, arg2=2, doFail=1))
         bs = yield self.do_test_step()
         self.assertEqual(len(self.flushLoggedErrors(RuntimeError)), 1)
         self.assertEqual(bs.getResults(), results.EXCEPTION)
@@ -298,10 +312,11 @@ class RunSteps(unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_Latin1ProducingCustomBuildStep(self):
-        self.factory.addStep(Latin1ProducingCustomBuildStep(logEncoding='latin-1'))
+        self.factory.addStep(
+            Latin1ProducingCustomBuildStep(logEncoding='latin-1'))
         yield self.do_test_step()
         self.assertLogs({
-            u'xx': u'o\N{CENT SIGN}\n',
+            'xx': 'o\N{CENT SIGN}\n',
         })
 
     @defer.inlineCallbacks

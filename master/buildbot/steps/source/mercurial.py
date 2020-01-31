@@ -12,18 +12,20 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+"""
+Source step code for mercurial
+"""
 
-# Source step code for mercurial
 
 from twisted.internet import defer
 from twisted.internet import reactor
 from twisted.python import log
 
 from buildbot.config import ConfigErrors
-from buildbot.interfaces import BuildSlaveTooOldError
+from buildbot.interfaces import WorkerTooOldError
 from buildbot.process import buildstep
 from buildbot.process import remotecommand
-from buildbot.status.results import SUCCESS
+from buildbot.process.results import SUCCESS
 from buildbot.steps.source.base import Source
 
 
@@ -33,7 +35,6 @@ class Mercurial(Source):
     name = "hg"
 
     renderables = ["repourl"]
-    possible_modes = ('incremental', 'full')
     possible_methods = (None, 'clean', 'fresh', 'clobber')
     possible_branchTypes = ('inrepo', 'dirname')
 
@@ -74,12 +75,12 @@ class Mercurial(Source):
         self.method = method
         self.clobberOnBranchChange = clobberOnBranchChange
         self.mode = mode
-        Source.__init__(self, **kwargs)
+        super().__init__(**kwargs)
 
         errors = []
-        if self.mode not in self.possible_modes:
+        if not self._hasAttrGroupMember('mode', self.mode):
             errors.append("mode %s is not one of %s" %
-                          (self.mode, self.possible_modes))
+                          (self.mode, self._listAttrGroupMembers('mode')))
         if self.method not in self.possible_methods:
             errors.append("method %s is not one of %s" %
                           (self.method, self.possible_methods))
@@ -99,12 +100,12 @@ class Mercurial(Source):
         self.stdio_log = self.addLogForRemoteCommands("stdio")
         d = self.checkHg()
 
+        @d.addCallback
         def checkInstall(hgInstalled):
             if not hgInstalled:
-                raise BuildSlaveTooOldError(
-                    "Mercurial is not installed on slave")
+                raise WorkerTooOldError(
+                    "Mercurial is not installed on worker")
             return 0
-        d.addCallback(checkInstall)
 
         d.addCallback(lambda _: self.sourcedirIsPatched())
         if self.branchType == 'dirname':
@@ -114,10 +115,7 @@ class Mercurial(Source):
         elif self.branchType == 'inrepo':
             self.update_branch = (branch or 'default')
 
-        if self.mode == 'full':
-            d.addCallback(lambda _: self.full())
-        elif self.mode == 'incremental':
-            d.addCallback(lambda _: self.incremental())
+        d.addCallback(self._getAttrGroupMember('mode', self.mode))
 
         if patch:
             d.addCallback(self.patch, patch)
@@ -127,7 +125,7 @@ class Mercurial(Source):
         d.addErrback(self.failed)
 
     @defer.inlineCallbacks
-    def full(self):
+    def mode_full(self, _):
         if self.method == 'clobber':
             yield self.clobber()
             return
@@ -143,7 +141,7 @@ class Mercurial(Source):
         else:
             raise ValueError("Unknown method, check your configuration")
 
-    def incremental(self):
+    def mode_incremental(self, _):
         if self.method is not None:
             raise ValueError(self.method)
 
@@ -152,11 +150,10 @@ class Mercurial(Source):
         @defer.inlineCallbacks
         def _cmd(updatable):
             if updatable:
-                yield self._dovccmd(['pull', self.repourl])
+                yield self._dovccmd(self.getHgPullCommand())
                 return
-            else:
-                yield self._clone()
-                return
+            yield self._clone()
+            return
 
         d.addCallback(_cmd)
         d.addCallback(self._checkBranchChange)
@@ -190,10 +187,10 @@ class Mercurial(Source):
     def finish(self, res):
         d = defer.succeed(res)
 
+        @d.addCallback
         def _gotResults(results):
             self.setStatus(self.cmd, results)
             return results
-        d.addCallback(_gotResults)
         d.addCallback(self.finished)
         return d
 
@@ -201,6 +198,7 @@ class Mercurial(Source):
         d = self._dovccmd(
             ['parents', '--template', '{node}\\n'], collectStdout=True)
 
+        @d.addCallback
         def _setrev(stdout):
             revision = stdout.strip()
             if len(revision) != 40:
@@ -208,7 +206,6 @@ class Mercurial(Source):
             log.msg("Got Mercurial revision %s" % (revision, ))
             self.updateSourceProperty('got_revision', revision)
             return 0
-        d.addCallback(_setrev)
         return d
 
     @defer.inlineCallbacks
@@ -225,16 +222,27 @@ class Mercurial(Source):
         log.msg(msg)
         yield self._removeAddedFilesAndUpdate(None)
 
-    def _pullUpdate(self, res):
+    def getHgPullCommand(self):
         command = ['pull', self.repourl]
+        if self.revision:
+            command.extend(['--rev', self.revision])
+        elif self.branchType == 'inrepo':
+            command.extend(['--rev', self.update_branch])
+        return command
+
+    def _pullUpdate(self, res):
+        command = self.getHgPullCommand()
         d = self._dovccmd(command)
         d.addCallback(self._checkBranchChange)
         return d
 
-    def _dovccmd(self, command, collectStdout=False, initialStdin=None, decodeRC={0: SUCCESS},
+    def _dovccmd(self, command, collectStdout=False, initialStdin=None, decodeRC=None,
                  abandonOnFailure=True):
         if not command:
             raise ValueError("No command specified")
+
+        if decodeRC is None:
+            decodeRC = {0: SUCCESS}
         cmd = remotecommand.RemoteShellCommand(self.workdir, ['hg', '--verbose'] + command,
                                                env=self.env,
                                                logEnviron=self.logEnviron,
@@ -245,15 +253,14 @@ class Mercurial(Source):
         cmd.useLog(self.stdio_log, False)
         d = self.runCommand(cmd)
 
-        def evaluateCommand(cmd):
+        @d.addCallback
+        def evaluateCommand(_):
             if abandonOnFailure and cmd.didFail():
                 log.msg("Source step failed while running command %s" % cmd)
                 raise buildstep.BuildStepFailed()
             if collectStdout:
                 return cmd.stdout
-            else:
-                return cmd.rc
-        d.addCallback(lambda _: evaluateCommand(cmd))
+            return cmd.rc
         return d
 
     def computeSourceRevision(self, changes):
@@ -272,13 +279,12 @@ class Mercurial(Source):
     def _getCurrentBranch(self):
         if self.branchType == 'dirname':
             return defer.succeed(self.branch)
-        else:
-            d = self._dovccmd(['identify', '--branch'], collectStdout=True)
+        d = self._dovccmd(['identify', '--branch'], collectStdout=True)
 
-            def _getbranch(stdout):
-                return stdout.strip()
-            d.addCallback(_getbranch).addErrback
-            return d
+        @d.addCallback
+        def _getbranch(stdout):
+            return stdout.strip()
+        return d
 
     def _getMethod(self):
         if self.method is not None and self.mode != 'incremental':
@@ -296,15 +302,16 @@ class Mercurial(Source):
         d = self._dovccmd(
             command, collectStdout=True, decodeRC={0: SUCCESS, 1: SUCCESS})
 
+        @d.addCallback
         def parseAndRemove(stdout):
             files = []
             for filename in stdout.splitlines():
                 filename = self.workdir + '/' + filename
                 files.append(filename)
-            if len(files) == 0:
+            if not files:
                 d = defer.succeed(0)
             else:
-                if self.slaveVersionIsOlderThan('rmdir', '2.14'):
+                if self.workerVersionIsOlderThan('rmdir', '2.14'):
                     d = self.removeFiles(files)
                 else:
                     cmd = remotecommand.RemoteCommand('rmdir', {'dir': files,
@@ -314,7 +321,6 @@ class Mercurial(Source):
                     d = self.runCommand(cmd)
                     d.addCallback(lambda _: cmd.rc)
             return d
-        d.addCallback(parseAndRemove)
         d.addCallback(self._update)
         return d
 
@@ -326,9 +332,8 @@ class Mercurial(Source):
             cmd.useLog(self.stdio_log, False)
             yield self.runCommand(cmd)
             if cmd.rc != 0:
-                defer.returnValue(cmd.rc)
-                return
-        defer.returnValue(0)
+                return cmd.rc
+        return 0
 
     def _update(self, _):
         command = ['update', '--clean']
@@ -369,11 +374,9 @@ class Mercurial(Source):
     def checkHg(self):
         d = self._dovccmd(['--version'])
 
+        @d.addCallback
         def check(res):
-            if res == 0:
-                return True
-            return False
-        d.addCallback(check)
+            return res == 0
         return d
 
     def applyPatch(self, patch):

@@ -13,15 +13,19 @@
 #
 # Copyright Buildbot Team Members
 
+
 import os
-import sqlalchemy as sa
 import time
 
-from buildbot.db import pool
-from buildbot.test.util import db
+import sqlalchemy as sa
+
 from twisted.internet import defer
 from twisted.internet import reactor
 from twisted.trial import unittest
+
+from buildbot.db import pool
+from buildbot.test.util import db
+from buildbot.util import sautils
 
 
 class Basic(unittest.TestCase):
@@ -30,54 +34,65 @@ class Basic(unittest.TestCase):
 
     def setUp(self):
         self.engine = sa.create_engine('sqlite://')
+        self.engine.should_retry = lambda _: False
         self.engine.optimal_thread_pool_size = 1
-        self.pool = pool.DBThreadPool(self.engine)
+        self.pool = pool.DBThreadPool(self.engine, reactor=reactor)
 
+    @defer.inlineCallbacks
     def tearDown(self):
-        self.pool.shutdown()
+        yield self.pool.shutdown()
 
+    @defer.inlineCallbacks
     def test_do(self):
         def add(conn, addend1, addend2):
             rp = conn.execute("SELECT %d + %d" % (addend1, addend2))
             return rp.scalar()
-        d = self.pool.do(add, 10, 11)
+        res = yield self.pool.do(add, 10, 11)
 
-        def check(res):
-            self.assertEqual(res, 21)
-        d.addCallback(check)
-        return d
+        self.assertEqual(res, 21)
+
+    @defer.inlineCallbacks
+    def expect_failure(self, d, expected_exception, expect_logged_error=False):
+        exception = None
+        try:
+            yield d
+        except Exception as e:
+            exception = e
+        errors = self.flushLoggedErrors(expected_exception)
+        if expect_logged_error:
+            self.assertEqual(len(errors), 1)
+        self.assertTrue(isinstance(exception, expected_exception))
 
     def test_do_error(self):
         def fail(conn):
             rp = conn.execute("EAT COOKIES")
             return rp.scalar()
-        d = self.pool.do(fail)
-        return self.assertFailure(d, sa.exc.OperationalError)
+
+        return self.expect_failure(self.pool.do(fail), sa.exc.OperationalError,
+                                   expect_logged_error=True)
 
     def test_do_exception(self):
         def raise_something(conn):
             raise RuntimeError("oh noes")
-        d = self.pool.do(raise_something)
-        return self.assertFailure(d, RuntimeError)
+        return self.expect_failure(self.pool.do(raise_something), RuntimeError,
+                                   expect_logged_error=True)
 
+    @defer.inlineCallbacks
     def test_do_with_engine(self):
         def add(engine, addend1, addend2):
             rp = engine.execute("SELECT %d + %d" % (addend1, addend2))
             return rp.scalar()
-        d = self.pool.do_with_engine(add, 10, 11)
+        res = yield self.pool.do_with_engine(add, 10, 11)
 
-        def check(res):
-            self.assertEqual(res, 21)
-        d.addCallback(check)
-        return d
+        self.assertEqual(res, 21)
 
     def test_do_with_engine_exception(self):
         def fail(engine):
             rp = engine.execute("EAT COOKIES")
             return rp.scalar()
-        d = self.pool.do_with_engine(fail)
-        return self.assertFailure(d, sa.exc.OperationalError)
+        return self.expect_failure(self.pool.do_with_engine(fail), sa.exc.OperationalError)
 
+    @defer.inlineCallbacks
     def test_persistence_across_invocations(self):
         # NOTE: this assumes that both methods are called with the same
         # connection; if they run in parallel threads then it is not valid to
@@ -85,16 +100,13 @@ class Basic(unittest.TestCase):
         # transaction (and thus created the table) by the time the second
         # transaction runs.  This is why we set optimal_thread_pool_size in
         # setUp.
-        d = defer.succeed(None)
-
         def create_table(engine):
             engine.execute("CREATE TABLE tmp ( a integer )")
-        d.addCallback(lambda r: self.pool.do_with_engine(create_table))
+        yield self.pool.do_with_engine(create_table)
 
         def insert_into_table(engine):
             engine.execute("INSERT INTO tmp values ( 1 )")
-        d.addCallback(lambda r: self.pool.do_with_engine(insert_into_table))
-        return d
+        yield self.pool.do_with_engine(insert_into_table)
 
 
 class Stress(unittest.TestCase):
@@ -106,10 +118,11 @@ class Stress(unittest.TestCase):
 
         self.engine = sa.create_engine('sqlite:///test.sqlite')
         self.engine.optimal_thread_pool_size = 2
-        self.pool = pool.DBThreadPool(self.engine)
+        self.pool = pool.DBThreadPool(self.engine, reactor=reactor)
 
+    @defer.inlineCallbacks
     def tearDown(self):
-        self.pool.shutdown()
+        yield self.pool.shutdown()
         os.unlink("test.sqlite")
 
     @defer.inlineCallbacks
@@ -142,41 +155,44 @@ class BasicWithDebug(Basic):
 
     def setUp(self):
         pool.debug = True
-        return Basic.setUp(self)
+        return super().setUp()
 
     def tearDown(self):
         pool.debug = False
-        return Basic.tearDown(self)
+        return super().tearDown()
 
 
 class Native(unittest.TestCase, db.RealDatabaseMixin):
 
     # similar tests, but using the BUILDBOT_TEST_DB_URL
 
+    @defer.inlineCallbacks
     def setUp(self):
-        d = self.setUpRealDatabase(want_pool=False)
+        yield self.setUpRealDatabase(want_pool=False)
 
-        def make_pool(_):
-            self.pool = pool.DBThreadPool(self.db_engine)
-        d.addCallback(make_pool)
-        return d
+        self.pool = pool.DBThreadPool(self.db_engine, reactor=reactor)
 
+    @defer.inlineCallbacks
     def tearDown(self):
         # try to delete the 'native_tests' table
         meta = sa.MetaData()
-        native_tests = sa.Table("native_tests", meta)
+        native_tests = sautils.Table("native_tests", meta)
 
         def thd(conn):
             native_tests.drop(bind=self.db_engine, checkfirst=True)
-        d = self.pool.do(thd)
-        d.addCallback(lambda _: self.pool.shutdown())
-        d.addCallback(lambda _: self.tearDownRealDatabase())
-        return d
+        yield self.pool.do(thd)
 
+        # tearDownRealDatabase() won't shutdown the pool as want_pool was false in
+        # setUpRealDatabase call
+        yield self.pool.shutdown()
+
+        yield self.tearDownRealDatabase()
+
+    @defer.inlineCallbacks
     def test_ddl_and_queries(self):
         meta = sa.MetaData()
-        native_tests = sa.Table("native_tests", meta,
-                                sa.Column('name', sa.String(length=200)))
+        native_tests = sautils.Table("native_tests", meta,
+                                     sa.Column('name', sa.String(length=200)))
 
         # perform a DDL operation and immediately try to access that table;
         # this has caused problems in the past, so this is basically a
@@ -185,10 +201,8 @@ class Native(unittest.TestCase, db.RealDatabaseMixin):
             t = conn.begin()
             native_tests.create(bind=conn)
             t.commit()
-        d = self.pool.do(ddl)
+        yield self.pool.do(ddl)
 
         def access(conn):
             native_tests.insert(bind=conn).execute([{'name': 'foo'}])
-        d.addCallback(lambda _:
-                      self.pool.do(access))
-        return d
+        yield self.pool.do(access)

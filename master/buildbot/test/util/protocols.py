@@ -13,6 +13,7 @@
 #
 # Copyright Buildbot Team Members
 
+
 from buildbot.test.util import interfaces
 
 
@@ -37,9 +38,9 @@ class ConnectionInterfaceTest(interfaces.InterfaceTests):
         def remotePrint(self, message):
             pass
 
-    def test_sig_remoteGetSlaveInfo(self):
-        @self.assertArgSpecMatches(self.conn.remoteGetSlaveInfo)
-        def remoteGetSlaveInfo(self):
+    def test_sig_remoteGetWorkerInfo(self):
+        @self.assertArgSpecMatches(self.conn.remoteGetWorkerInfo)
+        def remoteGetWorkerInfo(self):
             pass
 
     def test_sig_remoteSetBuilderList(self):
@@ -65,5 +66,5 @@ class ConnectionInterfaceTest(interfaces.InterfaceTests):
 
     def test_sig_remoteInterruptCommand(self):
         @self.assertArgSpecMatches(self.conn.remoteInterruptCommand)
-        def remoteInterruptCommand(commandId, why):
+        def remoteInterruptCommand(builderName, commandId, why):
             pass

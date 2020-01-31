@@ -15,44 +15,209 @@
 
 import os
 
-from buildbot.changes import hgpoller
-from buildbot.test.util import changesource
-from buildbot.test.util import gpo
 from twisted.internet import defer
 from twisted.trial import unittest
 
+from buildbot.changes import hgpoller
+from buildbot.test.util import changesource
+from buildbot.test.util import gpo
+from buildbot.test.util.misc import TestReactorMixin
+
 ENVIRON_2116_KEY = 'TEST_THAT_ENVIRONMENT_GETS_PASSED_TO_SUBPROCESSES'
+LINESEP_BYTES = os.linesep.encode("ascii")
+PATHSEP_BYTES = os.pathsep.encode("ascii")
 
 
-class TestHgPoller(gpo.GetProcessOutputMixin,
-                   changesource.ChangeSourceMixin,
-                   unittest.TestCase):
+class TestHgPollerBase(gpo.GetProcessOutputMixin,
+                       changesource.ChangeSourceMixin,
+                       TestReactorMixin,
+                       unittest.TestCase):
+    usetimestamps = True
+    branches = None
+    bookmarks = None
 
+    @defer.inlineCallbacks
     def setUp(self):
+        self.setUpTestReactor()
+
         # To test that environment variables get propagated to subprocesses
         # (See #2116)
         os.environ[ENVIRON_2116_KEY] = 'TRUE'
         self.setUpGetProcessOutput()
-        d = self.setUpChangeSource()
+        yield self.setUpChangeSource()
         self.remote_repo = 'ssh://example.com/foo/baz'
-        self.branch = 'default'
+        self.remote_hgweb = 'http://example.com/foo/baz/rev/{}'
         self.repo_ready = True
 
         def _isRepositoryReady():
             return self.repo_ready
 
-        def create_poller(_):
-            self.poller = hgpoller.HgPoller(self.remote_repo,
-                                            workdir='/some/dir')
-            self.poller.master = self.master
-            self.poller._isRepositoryReady = _isRepositoryReady
-        d.addCallback(create_poller)
+        self.poller = hgpoller.HgPoller(self.remote_repo,
+                                        usetimestamps=self.usetimestamps,
+                                        workdir='/some/dir',
+                                        branches=self.branches,
+                                        bookmarks=self.bookmarks,
+                                        revlink=lambda branch, revision:
+                                            self.remote_hgweb.format(revision))
+        yield self.poller.setServiceParent(self.master)
+        self.poller._isRepositoryReady = _isRepositoryReady
 
-        def create_db(_):
-            return self.master.db.setup()
-        d.addCallback(create_db)
-        return d
+        yield self.master.db.setup()
 
+    @defer.inlineCallbacks
+    def check_current_rev(self, wished, branch='default'):
+        rev = yield self.poller._getCurrentRev(branch)
+        self.assertEqual(rev, str(wished))
+
+
+class TestHgPollerBranches(TestHgPollerBase):
+    branches = ['one', 'two']
+
+    @defer.inlineCallbacks
+    def test_poll_initial(self):
+        self.expectCommands(
+            gpo.Expect('hg', 'pull', '-b', 'one', '-b', 'two',
+                       'ssh://example.com/foo/baz')
+            .path('/some/dir'),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'one', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b"73591"),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'two', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b"22341"),
+        )
+
+        # do the poll
+        yield self.poller.poll()
+
+        # check the results
+        self.assertEqual(len(self.master.data.updates.changesAdded), 0)
+
+        yield self.check_current_rev(73591, 'one')
+        yield self.check_current_rev(22341, 'two')
+
+    @defer.inlineCallbacks
+    def test_poll_regular(self):
+        # normal operation. There's a previous revision, we get a new one.
+        # Let's say there was an intervening commit on an untracked branch, to
+        # make it more interesting.
+        self.expectCommands(
+            gpo.Expect('hg', 'pull', '-b', 'one', '-b', 'two',
+                       'ssh://example.com/foo/baz')
+            .path('/some/dir'),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'one', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b'6' + LINESEP_BYTES),
+            gpo.Expect('hg', 'log', '-r', '4::6',
+                       '--template={rev}:{node}\\n')
+            .path('/some/dir').stdout(LINESEP_BYTES.join([
+                        b'4:1aaa5',
+                        b'6:784bd',
+                    ])),
+            gpo.Expect('hg', 'log', '-r', '784bd',
+                       '--template={date|hgdate}' + os.linesep +
+                       '{author}' + os.linesep +
+                       "{files % '{file}" +
+                       os.pathsep + "'}" +
+                       os.linesep + '{desc|strip}')
+            .path('/some/dir').stdout(LINESEP_BYTES.join([
+                b'1273258009.0 -7200',
+                b'Joe Test <joetest@example.org>',
+                b'file1 file2',
+                b'Comment',
+                b''])),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'two', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b'3' + LINESEP_BYTES),
+        )
+
+        yield self.poller._setCurrentRev(3, 'two')
+        yield self.poller._setCurrentRev(4, 'one')
+
+        yield self.poller.poll()
+        yield self.check_current_rev(6, 'one')
+
+        self.assertEqual(len(self.master.data.updates.changesAdded), 1)
+        change = self.master.data.updates.changesAdded[0]
+        self.assertEqual(change['revision'], '784bd')
+        self.assertEqual(change['revlink'], 'http://example.com/foo/baz/rev/784bd')
+        self.assertEqual(change['comments'], 'Comment')
+
+
+class TestHgPollerBookmarks(TestHgPollerBase):
+    bookmarks = ['one', 'two']
+
+    @defer.inlineCallbacks
+    def test_poll_initial(self):
+        self.expectCommands(
+            gpo.Expect('hg', 'pull', '-B', 'one', '-B', 'two',
+                       'ssh://example.com/foo/baz')
+            .path('/some/dir'),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'one', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b"73591"),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'two', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b"22341"),
+        )
+
+        # do the poll
+        yield self.poller.poll()
+
+        # check the results
+        self.assertEqual(len(self.master.data.updates.changesAdded), 0)
+
+        yield self.check_current_rev(73591, 'one')
+        yield self.check_current_rev(22341, 'two')
+
+    @defer.inlineCallbacks
+    def test_poll_regular(self):
+        # normal operation. There's a previous revision, we get a new one.
+        # Let's say there was an intervening commit on an untracked branch, to
+        # make it more interesting.
+        self.expectCommands(
+            gpo.Expect('hg', 'pull', '-B', 'one', '-B', 'two',
+                       'ssh://example.com/foo/baz')
+            .path('/some/dir'),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'one', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b'6' + LINESEP_BYTES),
+            gpo.Expect('hg', 'log', '-r', '4::6',
+                       '--template={rev}:{node}\\n')
+            .path('/some/dir').stdout(LINESEP_BYTES.join([
+                        b'4:1aaa5',
+                        b'6:784bd',
+                    ])),
+            gpo.Expect('hg', 'log', '-r', '784bd',
+                       '--template={date|hgdate}' + os.linesep +
+                       '{author}' + os.linesep +
+                       "{files % '{file}" +
+                       os.pathsep + "'}" +
+                       os.linesep + '{desc|strip}')
+            .path('/some/dir').stdout(LINESEP_BYTES.join([
+                b'1273258009.0 -7200',
+                b'Joe Test <joetest@example.org>',
+                b'file1 file2',
+                b'Comment',
+                b''])),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'two', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b'3' + LINESEP_BYTES),
+        )
+
+        yield self.poller._setCurrentRev(3, 'two')
+        yield self.poller._setCurrentRev(4, 'one')
+
+        yield self.poller.poll()
+        yield self.check_current_rev(6, 'one')
+
+        self.assertEqual(len(self.master.data.updates.changesAdded), 1)
+        change = self.master.data.updates.changesAdded[0]
+        self.assertEqual(change['revision'], '784bd')
+        self.assertEqual(change['comments'], 'Comment')
+
+
+class TestHgPoller(TestHgPollerBase):
     def tearDown(self):
         del os.environ[ENVIRON_2116_KEY]
         return self.tearDownChangeSource()
@@ -72,15 +237,22 @@ class TestHgPoller(gpo.GetProcessOutputMixin,
         self.assertSubstring("HgPoller", self.poller.describe())
 
     def test_name(self):
-        self.assertEqual("%s[%s]" % (self.remote_repo, self.branch), self.poller.name)
+        self.assertEqual(self.remote_repo, self.poller.name)
 
         # and one with explicit name...
-        other = hgpoller.HgPoller(self.remote_repo, name="MyName", workdir='/some/dir')
+        other = hgpoller.HgPoller(
+            self.remote_repo, name="MyName", workdir='/some/dir')
         self.assertEqual("MyName", other.name)
+
+        # and one with explicit branches...
+        other = hgpoller.HgPoller(
+            self.remote_repo, branches=["b1", "b2"], workdir='/some/dir')
+        self.assertEqual(self.remote_repo + "_b1_b2", other.name)
 
     def test_hgbin_default(self):
         self.assertEqual(self.poller.hgbin, "hg")
 
+    @defer.inlineCallbacks
     def test_poll_initial(self):
         self.repo_ready = False
         # Test that environment variables get propagated to subprocesses
@@ -92,66 +264,38 @@ class TestHgPoller(gpo.GetProcessOutputMixin,
             gpo.Expect('hg', 'pull', '-b', 'default',
                        'ssh://example.com/foo/baz')
             .path('/some/dir'),
-            gpo.Expect('hg', 'heads', 'default', '--template={rev}' + os.linesep)
-            .path('/some/dir').stdout("73591"),
-            gpo.Expect('hg', 'log', '-b', 'default', '-r', '73591:73591',  # only fetches that head
-                       '--template={rev}:{node}\\n')
-            .path('/some/dir').stdout(os.linesep.join(['73591:4423cdb'])),
-            gpo.Expect('hg', 'log', '-r', '4423cdb',
-                       '--template={date|hgdate}' + os.linesep + '{author}' + os.linesep + "{files % '{file}" + os.pathsep + "'}" + os.linesep + '{desc|strip}')
-            .path('/some/dir').stdout(os.linesep.join([
-                '1273258100.0 -7200',
-                'Bob Test <bobtest@example.org>',
-                'file1 with spaces' + os.pathsep + os.path.join('dir with spaces', 'file2') + os.pathsep,
-                'This is rev 73591',
-                ''])),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'default', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b"73591"),
         )
 
         # do the poll
-        d = self.poller.poll()
+        yield self.poller.poll()
 
         # check the results
-        def check_changes(_):
-            self.assertEqual(len(self.master.data.updates.changesAdded), 1)
+        self.assertEqual(len(self.master.data.updates.changesAdded), 0)
 
-            change = self.master.data.updates.changesAdded[0]
-            self.assertEqual(change['revision'], '4423cdb')
-            self.assertEqual(change['author'],
-                             'Bob Test <bobtest@example.org>')
-            self.assertEqual(change['when_timestamp'], 1273258100),
-            self.assertEqual(change['files'], ['file1 with spaces', os.path.join('dir with spaces', 'file2')])
-            self.assertEqual(change['src'], 'hg')
-            self.assertEqual(change['branch'], 'default')
-            self.assertEqual(change['comments'], 'This is rev 73591')
-
-        d.addCallback(check_changes)
-        d.addCallback(self.check_current_rev(73591))
-        return d
-
-    def check_current_rev(self, wished):
-        def check_on_rev(_):
-            d = self.poller._getCurrentRev()
-            d.addCallback(lambda oid_rev: self.assertEqual(oid_rev[1], wished))
-        return check_on_rev
+        yield self.check_current_rev(73591)
 
     @defer.inlineCallbacks
     def test_poll_several_heads(self):
-        # If there are several heads on the named branch, the poller musn't
+        # If there are several heads on the named branch, the poller mustn't
         # climb (good enough for now, ideally it should even go to the common
         # ancestor)
         self.expectCommands(
             gpo.Expect('hg', 'pull', '-b', 'default',
                        'ssh://example.com/foo/baz')
             .path('/some/dir'),
-            gpo.Expect('hg', 'heads', 'default', '--template={rev}' + os.linesep)
-            .path('/some/dir').stdout('5' + os.linesep + '6' + os.linesep),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'default', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b'5' + LINESEP_BYTES + b'6' + LINESEP_BYTES)
         )
 
         yield self.poller._setCurrentRev(3)
 
         # do the poll: we must stay at rev 3
-        d = self.poller.poll()
-        d.addCallback(self.check_current_rev(3))
+        yield self.poller.poll()
+        yield self.check_current_rev(3)
 
     @defer.inlineCallbacks
     def test_poll_regular(self):
@@ -160,29 +304,83 @@ class TestHgPoller(gpo.GetProcessOutputMixin,
             gpo.Expect('hg', 'pull', '-b', 'default',
                        'ssh://example.com/foo/baz')
             .path('/some/dir'),
-            gpo.Expect('hg', 'heads', 'default', '--template={rev}' + os.linesep)
-            .path('/some/dir').stdout('5' + os.linesep),
-            gpo.Expect('hg', 'log', '-b', 'default', '-r', '5:5',
+            gpo.Expect(
+                'hg', 'heads', '-r', 'default', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b'5' + LINESEP_BYTES),
+            gpo.Expect('hg', 'log', '-r', '4::5',
                        '--template={rev}:{node}\\n')
-            .path('/some/dir').stdout('5:784bd' + os.linesep),
+            .path('/some/dir').stdout(LINESEP_BYTES.join([
+                        b'4:1aaa5',
+                        b'5:784bd',
+                    ])),
             gpo.Expect('hg', 'log', '-r', '784bd',
-                       '--template={date|hgdate}' + os.linesep + '{author}' + os.linesep + "{files % '{file}" + os.pathsep + "'}" + os.linesep + '{desc|strip}')
-            .path('/some/dir').stdout(os.linesep.join([
-                '1273258009.0 -7200',
-                'Joe Test <joetest@example.org>',
-                'file1 file2',
-                'Comment for rev 5',
-                ''])),
+                       '--template={date|hgdate}' + os.linesep +
+                       '{author}' + os.linesep +
+                       "{files % '{file}" +
+                       os.pathsep + "'}" +
+                       os.linesep + '{desc|strip}')
+            .path('/some/dir').stdout(LINESEP_BYTES.join([
+                b'1273258009.0 -7200',
+                b'Joe Test <joetest@example.org>',
+                b'file1 file2',
+                b'Comment for rev 5',
+                b''])),
         )
 
         yield self.poller._setCurrentRev(4)
 
-        d = self.poller.poll()
-        d.addCallback(self.check_current_rev(5))
+        yield self.poller.poll()
+        yield self.check_current_rev(5)
 
-        def check_changes(_):
-            self.assertEquals(len(self.master.data.updates.changesAdded), 1)
-            change = self.master.data.updates.changesAdded[0]
-            self.assertEqual(change['revision'], u'784bd')
-            self.assertEqual(change['comments'], u'Comment for rev 5')
-        d.addCallback(check_changes)
+        self.assertEqual(len(self.master.data.updates.changesAdded), 1)
+        change = self.master.data.updates.changesAdded[0]
+        self.assertEqual(change['revision'], '784bd')
+        self.assertEqual(change['comments'], 'Comment for rev 5')
+
+    @defer.inlineCallbacks
+    def test_poll_force_push(self):
+        #  There's a previous revision, but not linked with new rev
+        self.expectCommands(
+            gpo.Expect('hg', 'pull', '-b', 'default',
+                       'ssh://example.com/foo/baz')
+            .path('/some/dir'),
+            gpo.Expect(
+                'hg', 'heads', '-r', 'default', '--template={rev}' + os.linesep)
+            .path('/some/dir').stdout(b'5' + LINESEP_BYTES),
+            gpo.Expect('hg', 'log', '-r', '4::5',
+                       '--template={rev}:{node}\\n')
+            .path('/some/dir').stdout(b""),
+            gpo.Expect('hg', 'log', '-r', '5',
+                       '--template={rev}:{node}\\n')
+            .path('/some/dir').stdout(LINESEP_BYTES.join([
+                        b'5:784bd',
+                    ])),
+            gpo.Expect('hg', 'log', '-r', '784bd',
+                       '--template={date|hgdate}' + os.linesep +
+                       '{author}' + os.linesep +
+                       "{files % '{file}" +
+                       os.pathsep + "'}" +
+                       os.linesep + '{desc|strip}')
+            .path('/some/dir').stdout(LINESEP_BYTES.join([
+                b'1273258009.0 -7200',
+                b'Joe Test <joetest@example.org>',
+                b'file1 file2',
+                b'Comment for rev 5',
+                b''])),
+        )
+
+        yield self.poller._setCurrentRev(4)
+
+        yield self.poller.poll()
+        yield self.check_current_rev(5)
+
+        self.assertEqual(len(self.master.data.updates.changesAdded), 1)
+        change = self.master.data.updates.changesAdded[0]
+        self.assertEqual(change['revision'], '784bd')
+        self.assertEqual(change['comments'], 'Comment for rev 5')
+
+
+class HgPollerNoTimestamp(TestHgPoller):
+    """ Test HgPoller() without parsing revision commit timestamp """
+
+    usetimestamps = False

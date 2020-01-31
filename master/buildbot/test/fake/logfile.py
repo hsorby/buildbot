@@ -13,13 +13,14 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot import util
-from buildbot.util import lineboundaries
 from twisted.internet import defer
 from twisted.python import log
 
+from buildbot import util
+from buildbot.util import lineboundaries
 
-class FakeLogFile(object):
+
+class FakeLogFile:
 
     def __init__(self, name, step):
         self.name = name
@@ -43,7 +44,7 @@ class FakeLogFile(object):
             return self.lbfs[stream]
         except KeyError:
             def wholeLines(lines):
-                if not isinstance(lines, unicode):
+                if not isinstance(lines, str):
                     lines = lines.decode('utf-8')
                 if self.name in self.step.logobservers:
                     for obs in self.step.logobservers[self.name]:
@@ -81,6 +82,7 @@ class FakeLogFile(object):
     def finish(self):
         self.flushFakeLogfile()
         self.finished = True
+        return defer.succeed(None)
 
     def fakeData(self, header='', stdout='', stderr=''):
         if header:

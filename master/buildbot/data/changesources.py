@@ -13,14 +13,16 @@
 #
 # Copyright Buildbot Team Members
 
+
+from twisted.internet import defer
+
 from buildbot.data import base
 from buildbot.data import masters
 from buildbot.data import types
 from buildbot.db.changesources import ChangeSourceAlreadyClaimedError
-from twisted.internet import defer
 
 
-class Db2DataMixin(object):
+class Db2DataMixin:
 
     @defer.inlineCallbacks
     def db2data(self, dbdict):
@@ -33,7 +35,7 @@ class Db2DataMixin(object):
             'name': dbdict['name'],
             'master': master,
         }
-        defer.returnValue(data)
+        return data
 
 
 class ChangeSourceEndpoint(Db2DataMixin, base.Endpoint):
@@ -50,8 +52,7 @@ class ChangeSourceEndpoint(Db2DataMixin, base.Endpoint):
         if 'masterid' in kwargs:
             if dbdict['masterid'] != kwargs['masterid']:
                 return
-        defer.returnValue((yield self.db2data(dbdict))
-                          if dbdict else None)
+        return (yield self.db2data(dbdict)) if dbdict else None
 
 
 class ChangeSourcesEndpoint(Db2DataMixin, base.Endpoint):
@@ -70,11 +71,7 @@ class ChangeSourcesEndpoint(Db2DataMixin, base.Endpoint):
         csdicts = yield defer.DeferredList(
             [self.db2data(cs) for cs in changesources],
             consumeErrors=True, fireOnOneErrback=True)
-        defer.returnValue([r for (s, r) in csdicts])
-
-    def startConsuming(self, callback, options, kwargs):
-        return self.master.mq.startConsuming(callback,
-                                             ('changesources', None, None))
+        return [r for (s, r) in csdicts]
 
 
 class ChangeSource(base.ResourceType):

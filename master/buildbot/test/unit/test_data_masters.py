@@ -13,18 +13,20 @@
 #
 # Copyright Buildbot Team Members
 
+
 import mock
 
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot.data import masters
-from buildbot.status.results import RETRY
+from buildbot.process.results import RETRY
 from buildbot.test.fake import fakedb
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import endpoint
 from buildbot.test.util import interfaces
+from buildbot.test.util.misc import TestReactorMixin
 from buildbot.util import epoch2datetime
-from twisted.internet import defer
-from twisted.internet import task
-from twisted.trial import unittest
 
 SOMETIME = 1349016870
 OTHERTIME = 1249016870
@@ -51,47 +53,37 @@ class MasterEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def tearDown(self):
         self.tearDownEndpoint()
 
+    @defer.inlineCallbacks
     def test_get_existing(self):
-        d = self.callGet(('masters', 14))
+        master = yield self.callGet(('masters', 14))
 
-        @d.addCallback
-        def check(master):
-            self.validateData(master)
-            self.assertEqual(master['name'], 'other:master')
-        return d
+        self.validateData(master)
+        self.assertEqual(master['name'], 'other:master')
 
+    @defer.inlineCallbacks
     def test_get_builderid_existing(self):
-        d = self.callGet(('builders', 23, 'masters', 13))
+        master = yield self.callGet(('builders', 23, 'masters', 13))
 
-        @d.addCallback
-        def check(master):
-            self.validateData(master)
-            self.assertEqual(master['name'], 'some:master')
-        return d
+        self.validateData(master)
+        self.assertEqual(master['name'], 'some:master')
 
+    @defer.inlineCallbacks
     def test_get_builderid_no_match(self):
-        d = self.callGet(('builders', 24, 'masters', 13))
+        master = yield self.callGet(('builders', 24, 'masters', 13))
 
-        @d.addCallback
-        def check(master):
-            self.assertEqual(master, None)
-        return d
+        self.assertEqual(master, None)
 
+    @defer.inlineCallbacks
     def test_get_builderid_missing(self):
-        d = self.callGet(('builders', 25, 'masters', 13))
+        master = yield self.callGet(('builders', 25, 'masters', 13))
 
-        @d.addCallback
-        def check(master):
-            self.assertEqual(master, None)
-        return d
+        self.assertEqual(master, None)
 
+    @defer.inlineCallbacks
     def test_get_missing(self):
-        d = self.callGet(('masters', 99))
+        master = yield self.callGet(('masters', 99))
 
-        @d.addCallback
-        def check(master):
-            self.assertEqual(master, None)
-        return d
+        self.assertEqual(master, None)
 
 
 class MastersEndpoint(endpoint.EndpointMixin, unittest.TestCase):
@@ -114,45 +106,35 @@ class MastersEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def tearDown(self):
         self.tearDownEndpoint()
 
+    @defer.inlineCallbacks
     def test_get(self):
-        d = self.callGet(('masters',))
+        masters = yield self.callGet(('masters',))
 
-        @d.addCallback
-        def check(masters):
-            [self.validateData(m) for m in masters]
-            self.assertEqual(sorted([m['masterid'] for m in masters]),
-                             [13, 14])
-        return d
+        [self.validateData(m) for m in masters]
+        self.assertEqual(sorted([m['masterid'] for m in masters]),
+                         [13, 14])
 
+    @defer.inlineCallbacks
     def test_get_builderid(self):
-        d = self.callGet(('builders', 22, 'masters'))
+        masters = yield self.callGet(('builders', 22, 'masters'))
 
-        @d.addCallback
-        def check(masters):
-            [self.validateData(m) for m in masters]
-            self.assertEqual(sorted([m['masterid'] for m in masters]),
-                             [13])
-        return d
+        [self.validateData(m) for m in masters]
+        self.assertEqual(sorted([m['masterid'] for m in masters]),
+                         [13])
 
+    @defer.inlineCallbacks
     def test_get_builderid_missing(self):
-        d = self.callGet(('builders', 23, 'masters'))
+        masters = yield self.callGet(('builders', 23, 'masters'))
 
-        @d.addCallback
-        def check(masters):
-            self.assertEqual(masters, [])
-        return d
-
-    def test_startConsuming(self):
-        return self.callStartConsuming({}, {},
-                                       expected_filter=('masters',
-                                                        None, None))
+        self.assertEqual(masters, [])
 
 
-class Master(interfaces.InterfaceTests, unittest.TestCase):
+class Master(TestReactorMixin, interfaces.InterfaceTests, unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(wantMq=True, wantDb=True,
-                                             wantData=True, testcase=self)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=True, wantDb=True,
+                                             wantData=True)
         self.rtype = masters.Master(self.master)
 
     def test_signature_masterActive(self):
@@ -164,8 +146,7 @@ class Master(interfaces.InterfaceTests, unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_masterActive(self):
-        clock = task.Clock()
-        clock.advance(60)
+        self.reactor.advance(60)
 
         self.master.db.insertTestData([
             fakedb.Master(id=13, name='myname', active=0,
@@ -177,8 +158,7 @@ class Master(interfaces.InterfaceTests, unittest.TestCase):
         ])
 
         # initial checkin
-        yield self.rtype.masterActive(
-            name=u'myname', masterid=13, _reactor=clock)
+        yield self.rtype.masterActive(name='myname', masterid=13)
         master = yield self.master.db.masters.getMaster(13)
         self.assertEqual(master, dict(id=13, name='myname',
                                       active=True, last_active=epoch2datetime(60)))
@@ -189,10 +169,9 @@ class Master(interfaces.InterfaceTests, unittest.TestCase):
         self.master.mq.productions = []
 
         # updated checkin time, re-activation
-        clock.advance(60)
+        self.reactor.advance(60)
         yield self.master.db.masters.markMasterInactive(13)
-        yield self.rtype.masterActive(
-            u'myname', masterid=13, _reactor=clock)
+        yield self.rtype.masterActive('myname', masterid=13)
         master = yield self.master.db.masters.getMaster(13)
         self.assertEqual(master, dict(id=13, name='myname',
                                       active=True, last_active=epoch2datetime(120)))
@@ -211,44 +190,41 @@ class Master(interfaces.InterfaceTests, unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_masterStopped(self):
-        clock = task.Clock()
-        clock.advance(60)
+        self.reactor.advance(60)
 
         self.master.db.insertTestData([
-            fakedb.Master(id=13, name=u'aname', active=1,
-                          last_active=clock.seconds()),
+            fakedb.Master(id=13, name='aname', active=1,
+                          last_active=self.reactor.seconds()),
         ])
 
         self.rtype._masterDeactivated = mock.Mock()
-        yield self.rtype.masterStopped(name=u'aname', masterid=13)
+        yield self.rtype.masterStopped(name='aname', masterid=13)
         self.rtype._masterDeactivated. \
             assert_called_with(13, 'aname')
 
     @defer.inlineCallbacks
     def test_masterStopped_already(self):
-        clock = task.Clock()
-        clock.advance(60)
+        self.reactor.advance(60)
 
         self.master.db.insertTestData([
-            fakedb.Master(id=13, name=u'aname', active=0,
+            fakedb.Master(id=13, name='aname', active=0,
                           last_active=0),
         ])
 
         self.rtype._masterDeactivated = mock.Mock()
-        yield self.rtype.masterStopped(name=u'aname', masterid=13)
+        yield self.rtype.masterStopped(name='aname', masterid=13)
         self.rtype._masterDeactivated.assert_not_called()
 
     def test_signature_expireMasters(self):
         @self.assertArgSpecMatches(
             self.master.data.updates.expireMasters,  # fake
             self.rtype.expireMasters)  # real
-        def expireMasters(self):
+        def expireMasters(self, forceHouseKeeping=False):
             pass
 
     @defer.inlineCallbacks
     def test_expireMasters(self):
-        clock = task.Clock()
-        clock.advance(60)
+        self.reactor.advance(60)
 
         self.master.db.insertTestData([
             fakedb.Master(id=14, name='other', active=1,
@@ -261,12 +237,13 @@ class Master(interfaces.InterfaceTests, unittest.TestCase):
 
         # check after 10 minutes, and see #14 deactivated; #15 gets deactivated
         # by another master, so it's not included here
-        clock.advance(600)
+        self.reactor.advance(600)
         yield self.master.db.masters.markMasterInactive(15)
-        yield self.rtype.expireMasters(_reactor=clock)
+        yield self.rtype.expireMasters()
         master = yield self.master.db.masters.getMaster(14)
         self.assertEqual(master, dict(id=14, name='other',
-                                      active=False, last_active=None))
+                                      active=False,
+                                      last_active=epoch2datetime(0)))
         self.rtype._masterDeactivated. \
             assert_called_with(14, 'other')
 
@@ -278,17 +255,17 @@ class Master(interfaces.InterfaceTests, unittest.TestCase):
 
             # set up a running build with some steps
             fakedb.Builder(id=77, name='b1'),
-            fakedb.Buildslave(id=13, name='sl'),
+            fakedb.Worker(id=13, name='wrk'),
             fakedb.Buildset(id=8822),
             fakedb.BuildRequest(id=82, builderid=77, buildsetid=8822),
             fakedb.BuildRequestClaim(brid=82, masterid=14,
                                      claimed_at=SOMETIME),
-            fakedb.Build(id=13, builderid=77, masterid=14, buildslaveid=13,
+            fakedb.Build(id=13, builderid=77, masterid=14, workerid=13,
                          buildrequestid=82, number=3, results=None),
             fakedb.Step(id=200, buildid=13),
             fakedb.Log(id=2000, stepid=200, num_lines=2),
             fakedb.LogChunk(logid=2000, first_line=1, last_line=2,
-                            content=u'ab\ncd')
+                            content='ab\ncd')
         ])
 
         # mock out the _masterDeactivated methods this will call
@@ -317,7 +294,8 @@ class Master(interfaces.InterfaceTests, unittest.TestCase):
         # see that we finished off that build and its steps and logs
         updates = self.master.data.updates
         updates.finishLog.assert_called_with(logid=2000)
-        updates.finishStep.assert_called_with(stepid=200, results=RETRY, hidden=False)
+        updates.finishStep.assert_called_with(
+            stepid=200, results=RETRY, hidden=False)
         updates.finishBuild.assert_called_with(buildid=13, results=RETRY)
 
         self.assertEqual(self.master.mq.productions, [

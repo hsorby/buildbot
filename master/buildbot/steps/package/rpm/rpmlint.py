@@ -17,6 +17,7 @@
 Steps and objects related to rpmlint.
 """
 
+
 from buildbot.steps.package import util as pkgutil
 from buildbot.steps.shell import Test
 
@@ -49,7 +50,7 @@ class RpmLint(Test):
         @type kwargs: dict
         @param fileloc: all other keyword arguments.
         """
-        Test.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         if fileloc:
             self.fileloc = fileloc
         if config:
@@ -73,6 +74,6 @@ class RpmLint(Test):
         warnings = self.obs.warnings
         errors = []
         if warnings:
-            self.addCompleteLog('%d Warnings' % len(warnings), "".join(warnings))
+            self.addCompleteLog('%d Warnings' % len(warnings), "\n".join(warnings))
         if errors:
-            self.addCompleteLog('%d Errors' % len(errors), "".join(errors))
+            self.addCompleteLog('%d Errors' % len(errors), "\n".join(errors))

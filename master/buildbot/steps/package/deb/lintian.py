@@ -17,11 +17,12 @@
 Steps and objects related to lintian
 """
 
+
 from buildbot import config
 from buildbot.process import buildstep
-from buildbot.status.results import FAILURE
-from buildbot.status.results import SUCCESS
-from buildbot.status.results import WARNINGS
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
+from buildbot.process.results import WARNINGS
 from buildbot.steps.package import util as pkgutil
 from buildbot.steps.shell import ShellCommand
 
@@ -29,7 +30,7 @@ from buildbot.steps.shell import ShellCommand
 class MaxQObserver(buildstep.LogLineObserver):
 
     def __init__(self):
-        buildstep.LogLineObserver.__init__(self)
+        super().__init__()
         self.failures = 0
 
     def outLineReceived(self, line):
@@ -62,7 +63,7 @@ class DebLintian(ShellCommand):
         @type kwargs: dict
         @param kwargs: all other keyword arguments.
         """
-        ShellCommand.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         if fileloc:
             self.fileloc = fileloc
         if suppressTags:
@@ -90,10 +91,10 @@ class DebLintian(ShellCommand):
         errors = self.obs.errors
 
         if warnings:
-            self.addCompleteLog('%d Warnings' % len(warnings), "".join(warnings))
+            self.addCompleteLog('%d Warnings' % len(warnings), "\n".join(warnings))
             self.warnCount = len(warnings)
         if errors:
-            self.addCompleteLog('%d Errors' % len(errors), "".join(errors))
+            self.addCompleteLog('%d Errors' % len(errors), "\n".join(errors))
             self.errCount = len(errors)
 
     def evaluateCommand(self, cmd):

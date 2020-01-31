@@ -13,17 +13,18 @@
 #
 # Copyright Buildbot Team Members
 
+
 import re
 
 from buildbot.process import logobserver
-from buildbot.status.results import FAILURE
-from buildbot.status.results import SUCCESS
-from buildbot.status.results import WARNINGS
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
+from buildbot.process.results import WARNINGS
 from buildbot.steps.shell import ShellCommand
 
 
 class Cppcheck(ShellCommand):
-    # Highly inspirated from the Pylint step.
+    # Highly inspired from the Pylint step.
     name = "cppcheck"
     description = ["running", "cppcheck"]
     descriptionDone = ["cppcheck"]
@@ -41,12 +42,9 @@ class Cppcheck(ShellCommand):
                               ('enable', []),
                               ('inconclusive', False),
                               ('extra_args', [])]:
-            setattr(self, name, default)
-            if name in kwargs:
-                setattr(self, name, kwargs[name])
-                del kwargs[name]
+            setattr(self, name, kwargs.pop(name, default))
 
-        ShellCommand.__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.addLogObserver(
             'stdio', logobserver.LineConsumerLogObserver(self.logConsumer))
 

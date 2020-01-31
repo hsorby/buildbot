@@ -17,22 +17,28 @@
 Buildbot plugin infrastructure
 """
 
-from buildbot.plugins.db import get_plugins
-from buildbot.interfaces import IBuildSlave
+from buildbot import statistics
 from buildbot.interfaces import IBuildStep
 from buildbot.interfaces import IChangeSource
 from buildbot.interfaces import IScheduler
-from buildbot.interfaces import IStatusReceiver
+from buildbot.interfaces import IWorker
+from buildbot.plugins.db import get_plugins
 
-
-__all__ = ['changes', 'schedulers', 'buildslave', 'steps', 'status', 'util']
+__all__ = [
+    'changes', 'schedulers', 'steps', 'util', 'reporters', 'statistics',
+    'worker', 'secrets', 'webhooks'
+]
 
 
 # Names here match the names of the corresponding Buildbot module, hence
 # 'changes', 'schedulers', but 'buildslave'
-changes = get_plugins('change_source', IChangeSource)
-schedulers = get_plugins('scheduler', IScheduler)
-buildslave = get_plugins('build_slave', IBuildSlave)
-steps = get_plugins('step', IBuildStep)
-status = get_plugins('status', IStatusReceiver)
+changes = get_plugins('changes', IChangeSource)
+schedulers = get_plugins('schedulers', IScheduler)
+steps = get_plugins('steps', IBuildStep)
 util = get_plugins('util', None)
+reporters = get_plugins('reporters', None)
+secrets = get_plugins('secrets', None)
+webhooks = get_plugins('webhooks', None)
+
+# Worker entry point for new/updated plugins.
+worker = get_plugins('worker', IWorker)

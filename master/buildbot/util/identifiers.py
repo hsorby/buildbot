@@ -17,36 +17,36 @@ import re
 
 from buildbot import util
 
-ident_re = re.compile('^[a-zA-Z_-][a-zA-Z0-9_-]*$')
+ident_re = re.compile('^[a-zA-Z\u00a0-\U0010ffff_-][a-zA-Z0-9\u00a0-\U0010ffff_-]*$', flags=re.UNICODE)
 initial_re = re.compile('^[^a-zA-Z_-]')
-subsequent_re = re.compile('[^a-zA-Z-0-9_-]')
+subsequent_re = re.compile('[^a-zA-Z0-9_-]')
 trailing_digits_re = re.compile('_([0-9]+)$')
 
 
-def isIdentifier(maxLength, object):
-    if not isinstance(object, unicode):
+def isIdentifier(maxLength, obj):
+    if not isinstance(obj, str):
         return False
-    elif not ident_re.match(object):
+    elif not ident_re.match(obj):
         return False
-    elif not 0 < len(object) <= maxLength:
+    elif not obj or len(obj) > maxLength:
         return False
     return True
 
 
-def forceIdentifier(maxLength, str):
-    if not isinstance(str, basestring):
+def forceIdentifier(maxLength, s):
+    if not isinstance(s, str):
         raise TypeError("%r cannot be coerced to an identifier" % (str,))
 
-    # usually ascii2unicode can handle it
-    str = util.ascii2unicode(str)
-    if isIdentifier(maxLength, str):
-        return str
+    # usually bytes2unicode can handle it
+    s = util.bytes2unicode(s)
+    if isIdentifier(maxLength, s):
+        return s
 
     # trim to length and substitute out invalid characters
-    str = str[:maxLength]
-    str = initial_re.sub('_', str)
-    str = subsequent_re.subn('_', str)[0]
-    return str
+    s = s[:maxLength]
+    s = initial_re.sub('_', s)
+    s = subsequent_re.subn('_', s)[0]
+    return s
 
 
 def incrementIdentifier(maxLength, ident):

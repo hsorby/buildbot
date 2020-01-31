@@ -12,27 +12,25 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
-
 """
 Unit tests for the plugin framework
 """
 
 import mock
 
-import buildbot.plugins.db
+from twisted.trial import unittest
+from zope.interface import implementer
 
+import buildbot.plugins.db
 from buildbot.errors import PluginDBError
 from buildbot.interfaces import IPlugin
-from twisted.trial import unittest
-from zope.interface import implements
-
 
 # buildbot.plugins.db needs to be imported for patching, however just 'db' is
 # much shorter for using in tests
 db = buildbot.plugins.db
 
 
-class FakeEntry(object):
+class FakeEntry:
 
     """
     An entry suitable for unit tests
@@ -79,12 +77,12 @@ class ITestInterface(IPlugin):
         "Greets by :param:`name`"
 
 
-class ClassWithInterface(object):
+@implementer(ITestInterface)
+class ClassWithInterface:
 
     """
     a class to implement a simple interface
     """
-    implements(ITestInterface)
 
     def __init__(self, name=None):
         self._name = name
@@ -94,41 +92,42 @@ class ClassWithInterface(object):
         return name or self._name
 
 
-class ClassWithNoInterface(object):
+class ClassWithNoInterface:
 
     """
     just a class
     """
 
+
 # NOTE: buildbot.plugins.db prepends the group with common namespace --
 # 'buildbot.'
 _FAKE_ENTRIES = {
     'buildbot.interface': [
-        FakeEntry('good', 'non-existant', 'irrelevant', False,
+        FakeEntry('good', 'non-existent', 'irrelevant', False,
                   ClassWithInterface),
-        FakeEntry('deep.path', 'non-existant', 'irrelevant', False,
+        FakeEntry('deep.path', 'non-existent', 'irrelevant', False,
                   ClassWithInterface)
     ],
     'buildbot.interface_failed': [
-        FakeEntry('good', 'non-existant', 'irrelevant', True,
+        FakeEntry('good', 'non-existent', 'irrelevant', True,
                   ClassWithInterface)
     ],
     'buildbot.no_interface': [
-        FakeEntry('good', 'non-existant', 'irrelevant', False,
+        FakeEntry('good', 'non-existent', 'irrelevant', False,
                   ClassWithNoInterface)
     ],
     'buildbot.no_interface_again': [
-        FakeEntry('good', 'non-existant', 'irrelevant', False,
+        FakeEntry('good', 'non-existent', 'irrelevant', False,
                   ClassWithNoInterface)
     ],
     'buildbot.no_interface_failed': [
-        FakeEntry('good', 'non-existant', 'irrelevant', True,
+        FakeEntry('good', 'non-existent', 'irrelevant', True,
                   ClassWithNoInterface)
     ],
     'buildbot.duplicates': [
-        FakeEntry('good', 'non-existant', 'first', False,
+        FakeEntry('good', 'non-existent', 'first', False,
                   ClassWithNoInterface),
-        FakeEntry('good', 'non-existant', 'second', False,
+        FakeEntry('good', 'non-existent', 'second', False,
                   ClassWithNoInterface)
     ]
 }
@@ -180,9 +179,12 @@ class TestBuildbotPlugins(unittest.TestCase):
     def test_missing_plugin(self):
         plugins = db.get_plugins('interface', interface=ITestInterface)
 
-        self.assertRaises(AttributeError, getattr, plugins, 'bad')
-        self.assertRaises(PluginDBError, plugins.get, 'bad')
-        self.assertRaises(PluginDBError, plugins.get, 'good.extra')
+        with self.assertRaises(AttributeError):
+            getattr(plugins, 'bad')
+        with self.assertRaises(PluginDBError):
+            plugins.get('bad')
+        with self.assertRaises(PluginDBError):
+            plugins.get('good.extra')
 
     def test_interface_provided_deep(self):
         # Basic check before the actual test
@@ -208,13 +210,15 @@ class TestBuildbotPlugins(unittest.TestCase):
     def test_interface_provided_deps_failed(self):
         plugins = db.get_plugins('interface_failed', interface=ITestInterface,
                                  check_extras=True)
-        self.assertRaises(PluginDBError, plugins.get, 'good')
+        with self.assertRaises(PluginDBError):
+            plugins.get('good')
 
     def test_required_interface_not_provided(self):
         plugins = db.get_plugins('no_interface_again',
                                  interface=ITestInterface)
         self.assertTrue(plugins._interface is ITestInterface)
-        self.assertRaises(PluginDBError, plugins.get, 'good')
+        with self.assertRaises(PluginDBError):
+            plugins.get('good')
 
     def test_no_interface_provided(self):
         plugins = db.get_plugins('no_interface')
@@ -222,20 +226,53 @@ class TestBuildbotPlugins(unittest.TestCase):
 
     def test_no_interface_provided_deps_failed(self):
         plugins = db.get_plugins('no_interface_failed', check_extras=True)
-        self.assertRaises(PluginDBError, plugins.get, 'good')
+        with self.assertRaises(PluginDBError):
+            plugins.get('good')
 
     def test_failure_on_dups(self):
-        self.assertRaises(PluginDBError, db.get_plugins, 'duplicates',
-                          load_now=True)
+        with self.assertRaises(PluginDBError):
+            db.get_plugins('duplicates', load_now=True)
 
     def test_get_info_on_a_known_plugin(self):
         plugins = db.get_plugins('interface')
-        self.assertEqual(('non-existant', 'irrelevant'), plugins.info('good'))
+        self.assertEqual(('non-existent', 'irrelevant'), plugins.info('good'))
 
     def test_failure_on_unknown_plugin_info(self):
         plugins = db.get_plugins('interface')
-        self.assertRaises(PluginDBError, plugins.info, 'bad')
+        with self.assertRaises(PluginDBError):
+            plugins.info('bad')
 
     def test_failure_on_unknown_plugin_get(self):
         plugins = db.get_plugins('interface')
-        self.assertRaises(PluginDBError, plugins.get, 'bad')
+        with self.assertRaises(PluginDBError):
+            plugins.get('bad')
+
+
+class SimpleFakeEntry(FakeEntry):
+
+    def __init__(self, name, value):
+        super().__init__(name, 'non-existent', 'irrelevant', False, value)
+
+
+_WORKER_FAKE_ENTRIES = {
+    'buildbot.worker': [
+        SimpleFakeEntry('Worker', ClassWithInterface),
+        SimpleFakeEntry('EC2LatentWorker', ClassWithInterface),
+        SimpleFakeEntry('LibVirtWorker', ClassWithInterface),
+        SimpleFakeEntry('OpenStackLatentWorker', ClassWithInterface),
+        SimpleFakeEntry('newthirdparty', ClassWithInterface),
+        SimpleFakeEntry('deep.newthirdparty', ClassWithInterface),
+    ],
+    'buildbot.util': [
+        SimpleFakeEntry('WorkerLock', ClassWithInterface),
+        SimpleFakeEntry('enforceChosenWorker', ClassWithInterface),
+        SimpleFakeEntry('WorkerChoiceParameter', ClassWithInterface),
+    ],
+}
+
+
+def provide_worker_fake_entries(group):
+    """
+    give a set of fake entries for known groups
+    """
+    return _WORKER_FAKE_ENTRIES.get(group, [])

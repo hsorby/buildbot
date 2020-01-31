@@ -13,8 +13,13 @@
 #
 # Copyright Buildbot Team Members
 
+
 # Having them here prevents all kind of circular dependencies
 
 
 class PluginDBError(Exception):
+    pass
+
+
+class CaptureCallbackError(Exception):
     pass

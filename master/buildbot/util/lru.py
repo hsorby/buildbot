@@ -15,13 +15,14 @@
 
 from collections import defaultdict
 from collections import deque
-from itertools import ifilterfalse
-from twisted.internet import defer
-from twisted.python import log
+from itertools import filterfalse
 from weakref import WeakValueDictionary
 
+from twisted.internet import defer
+from twisted.python import log
 
-class LRUCache(object):
+
+class LRUCache:
 
     """
     A least-recently-used cache, with a fixed maximum size.
@@ -70,7 +71,7 @@ class LRUCache(object):
         return result
 
     def keys(self):
-        return self.cache.keys()
+        return list(self.cache)
 
     def set_max_size(self, max_size):
         if self.max_size == max_size:
@@ -120,8 +121,8 @@ class LRUCache(object):
             refcount.clear()
             queue_appendleft = queue.appendleft
             queue_appendleft(self.sentinel)
-            for k in ifilterfalse(refcount.__contains__,
-                                  iter(queue.pop, self.sentinel)):
+            for k in filterfalse(refcount.__contains__,
+                                 iter(queue.pop, self.sentinel)):
                 queue_appendleft(k)
                 refcount[k] = 1
 
@@ -175,7 +176,7 @@ class AsyncLRUCache(LRUCache):
     __slots__ = ['concurrent']
 
     def __init__(self, miss_fn, max_size=50):
-        LRUCache.__init__(self, miss_fn, max_size=max_size)
+        super().__init__(miss_fn, max_size=max_size)
         self.concurrent = {}
 
     def get(self, key, **miss_fn_kwargs):

@@ -15,18 +15,21 @@
 #
 # pylint: disable=C0111
 
-from buildbot.errors import PluginDBError
-from buildbot.interfaces import IPlugin
+import traceback
 from pkg_resources import iter_entry_points
-from types import StringTypes
+
 from zope.interface import Invalid
 from zope.interface.verify import verifyClass
+
+from buildbot.errors import PluginDBError
+from buildbot.interfaces import IPlugin
 
 # Base namespace for Buildbot specific plugins
 _NAMESPACE_BASE = 'buildbot'
 
 
-class _PluginEntry(object):
+class _PluginEntry:
+
     def __init__(self, group, entry, loader):
         self._group = group
         self._entry = entry
@@ -59,7 +62,39 @@ class _PluginEntry(object):
         return self._value
 
 
-class _NSNode(object):
+class _PluginEntryProxy(_PluginEntry):
+
+    """Proxy for specific entry with custom group name.
+
+    Used to provided access to the same entry from different namespaces.
+    """
+
+    def __init__(self, group, plugin_entry):
+        assert isinstance(plugin_entry, _PluginEntry)
+        self._plugin_entry = plugin_entry
+        self._group = group
+
+    def load(self):
+        self._plugin_entry.load()
+
+    @property
+    def group(self):
+        return self._group
+
+    @property
+    def name(self):
+        return self._plugin_entry.name
+
+    @property
+    def info(self):
+        return self._plugin_entry.info
+
+    @property
+    def value(self):
+        return self._plugin_entry.value
+
+
+class _NSNode:
     # pylint: disable=W0212
 
     def __init__(self):
@@ -70,8 +105,7 @@ class _NSNode(object):
             child.load()
 
     def add(self, name, entry):
-        assert isinstance(name, StringTypes) and isinstance(entry,
-                                                            _PluginEntry)
+        assert isinstance(name, str) and isinstance(entry, _PluginEntry)
         self._add(name, entry)
 
     def _add(self, name, entry):
@@ -105,16 +139,15 @@ class _NSNode(object):
 
         if isinstance(child, _PluginEntry):
             return child.value
-        else:
-            return child
+        return child
 
     def info(self, name):
-        assert isinstance(name, StringTypes)
+        assert isinstance(name, str)
 
         return self._get(name).info
 
     def get(self, name):
-        assert isinstance(name, StringTypes)
+        assert isinstance(name, str)
 
         return self._get(name).value
 
@@ -150,10 +183,12 @@ class _NSNode(object):
         return dict(self._info_all())
 
 
-class _Plugins(object):
+class _Plugins:
+
     """
     represent plugins within a namespace
     """
+
     def __init__(self, namespace, interface=None, check_extras=True):
         if interface is not None:
             assert interface.isOrExtends(IPlugin)
@@ -170,20 +205,22 @@ class _Plugins(object):
         if self._check_extras:
             try:
                 entry.require()
-            except Exception, err:
+            except Exception as err:
                 raise PluginDBError('Requirements are not satisfied '
                                     'for %s:%s: %s' % (self._group,
                                                        entry.name,
                                                        str(err)))
         try:
             result = entry.load()
-        except Exception, err:
+        except Exception as err:
+            # log full traceback of the bad entry to help support
+            traceback.print_exc()
             raise PluginDBError('Unable to load %s:%s: %s' %
                                 (self._group, entry.name, str(err)))
         if self._interface:
             try:
                 verifyClass(self._interface, result)
-            except Invalid, err:
+            except Invalid as err:
                 raise PluginDBError('Plugin %s:%s does not implement %s: %s' %
                                     (self._group, entry.name,
                                      self._interface.__name__, str(err)))
@@ -208,7 +245,7 @@ class _Plugins(object):
     @property
     def names(self):
         # Expensive operation
-        return self.info_all().keys()
+        return list(self.info_all())
 
     def info(self, name):
         """
@@ -234,14 +271,16 @@ class _Plugins(object):
     def __getattr__(self, name):
         try:
             return getattr(self._tree, name)
-        except PluginDBError, err:
+        except PluginDBError as err:
             raise AttributeError(str(err))
 
 
-class _PluginDB(object):
+class _PluginDB:
+
     """
     Plugin infrastructure support for Buildbot
     """
+
     def __init__(self):
         self._namespaces = dict()
 
@@ -256,7 +295,6 @@ class _PluginDB(object):
 
         if tempo is None:
             tempo = _Plugins(namespace, interface, check_extras)
-
             self._namespaces[namespace] = tempo
 
         if load_now:
@@ -269,7 +307,7 @@ class _PluginDB(object):
         """
         get a list of registered namespaces
         """
-        return self._namespaces.keys()
+        return list(self._namespaces)
 
     def info(self):
         """

@@ -1,29 +1,22 @@
 .container
   .row
     .well
-        h2 About this buildbot
+        h2
+          img.nut-spin(src="img/icon.svg", width="64px")
+          | &nbsp;About this&nbsp;
+          a(href="http://buildbot.net") buildbot
+          | &nbsp;running for&nbsp;
+          a(ng-href="{{config.titleURL}}") {{config.title}}
         .row
-          .col-sm-4
+          .col-sm-12
             ul
-              li Buildbot version: {{config.bbversion}}
-              li Twisted version: {{config.txversion}}
-          .col-sm-4
-            ul
-              li Project Name: {{config.projectname}}
-              li Project Version: {{config.projectversion}}
-              li Project Url: {{config.projecturl}}
-        .row
-          small
+              li(ng-repeat="v in config.versions") {{v[0]}} version: {{v[1]}}
 
-            | buildbot-www is configured using:
-            rawdata(data='config.config')
-            | buildbot-www is using the following open-source JavaScript libraries:
-            dl.dl-horizontal
-              div(ng-repeat='module in bower_configs')
-                dt
-                  a(ng-show='module.http_url', href='{{module.http_url}}') {{module.name}}
-                  span(ng-hide='module.http_url') {{module.name}}
-                dd {{module.version}}
+  .row
+    .well
+        h2 Configuration
+        | buildbot-www is configured using
+        rawdata(data='config')
   .row
     .well
       h2 API description

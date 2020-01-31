@@ -12,21 +12,25 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+"""
+This is a class which watches a maildir for new messages. It uses the
+linux dirwatcher API (if available) to look for new files. The
+.messageReceived method is invoked with the filename of the new message,
+relative to the top of the maildir (so it will look like "new/blahblah").
+"""
 
-
-# This is a class which watches a maildir for new messages. It uses the
-# linux dirwatcher API (if available) to look for new files. The
-# .messageReceived method is invoked with the filename of the new message,
-# relative to the top of the maildir (so it will look like "new/blahblah").
 
 import os
 
-from buildbot.util import service
 from twisted.application import internet
 from twisted.internet import defer
 from twisted.internet import reactor
+# We have to put it here, since we use it to provide feedback
 from twisted.python import log
 from twisted.python import runtime
+
+from buildbot.util import service
+
 dnotify = None
 try:
     import dnotify
@@ -38,11 +42,12 @@ class NoSuchMaildir(Exception):
     pass
 
 
-class MaildirService(service.AsyncMultiService):
+class MaildirService(service.BuildbotService):
     pollinterval = 10  # only used if we don't have DNotify
+    name = 'MaildirService'
 
     def __init__(self, basedir=None):
-        service.AsyncMultiService.__init__(self)
+        super().__init__()
         if basedir:
             self.setBasedir(basedir)
         self.files = []
@@ -58,6 +63,7 @@ class MaildirService(service.AsyncMultiService):
         self.newdir = os.path.join(self.basedir, "new")
         self.curdir = os.path.join(self.basedir, "cur")
 
+    @defer.inlineCallbacks
     def startService(self):
         if not os.path.isdir(self.newdir) or not os.path.isdir(self.curdir):
             raise NoSuchMaildir("invalid maildir '%s'" % self.basedir)
@@ -74,10 +80,11 @@ class MaildirService(service.AsyncMultiService):
             # because of a python bug
             log.msg("DNotify failed, falling back to polling")
         if not self.dnotify:
-            self.timerService = internet.TimerService(self.pollinterval, self.poll)
-            self.timerService.setServiceParent(self)
+            self.timerService = internet.TimerService(
+                self.pollinterval, self.poll)
+            yield self.timerService.setServiceParent(self)
         self.poll()
-        return service.AsyncMultiService.startService(self)
+        yield super().startService()
 
     def dnotify_callback(self):
         log.msg("dnotify noticed something, now polling")
@@ -100,7 +107,7 @@ class MaildirService(service.AsyncMultiService):
         if self.timerService is not None:
             self.timerService.disownServiceParent()
             self.timerService = None
-        return service.AsyncMultiService.stopService(self)
+        return super().stopService()
 
     @defer.inlineCallbacks
     def poll(self):
@@ -119,7 +126,8 @@ class MaildirService(service.AsyncMultiService):
                 try:
                     yield self.messageReceived(n)
                 except Exception:
-                    log.err(None, "while reading '%s' from maildir '%s':" % (n, self.basedir))
+                    log.err(
+                        None, "while reading '%s' from maildir '%s':" % (n, self.basedir))
         except Exception:
             log.err(None, "while polling maildir '%s':" % (self.basedir,))
 
@@ -134,7 +142,7 @@ class MaildirService(service.AsyncMultiService):
         elif runtime.platformType == "win32":
             # do this backwards under windows, because you can't move a file
             # that somebody is holding open. This was causing a Permission
-            # Denied error on bear's win32-twisted1.3 buildslave.
+            # Denied error on bear's win32-twisted1.3 worker.
             os.rename(os.path.join(self.newdir, filename),
                       os.path.join(self.curdir, filename))
             path = os.path.join(self.curdir, filename)

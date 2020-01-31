@@ -15,14 +15,17 @@
 
 import mock
 
+from twisted.internet import defer
+from twisted.python import failure
+from twisted.trial import unittest
+
 from buildbot.data import schedulers
 from buildbot.test.fake import fakedb
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import endpoint
 from buildbot.test.util import interfaces
-from twisted.internet import defer
-from twisted.python import failure
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
+from buildbot.util import epoch2datetime
 
 
 class SchedulerEndpoint(endpoint.EndpointMixin, unittest.TestCase):
@@ -46,56 +49,49 @@ class SchedulerEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def tearDown(self):
         self.tearDownEndpoint()
 
+    @defer.inlineCallbacks
     def test_get_existing(self):
-        d = self.callGet(('schedulers', 14))
+        scheduler = yield self.callGet(('schedulers', 14))
 
-        @d.addCallback
-        def check(scheduler):
-            self.validateData(scheduler)
-            self.assertEqual(scheduler['name'], 'other:scheduler')
-        return d
+        self.validateData(scheduler)
+        self.assertEqual(scheduler['name'], 'other:scheduler')
 
+    @defer.inlineCallbacks
     def test_get_no_master(self):
-        d = self.callGet(('schedulers', 13))
+        scheduler = yield self.callGet(('schedulers', 13))
 
-        @d.addCallback
-        def check(scheduler):
-            self.validateData(scheduler)
-            self.assertEqual(scheduler['master'], None),
-        return d
+        self.validateData(scheduler)
+        self.assertEqual(scheduler['master'], None),
 
+    @defer.inlineCallbacks
     def test_get_masterid_existing(self):
-        d = self.callGet(('masters', 22, 'schedulers', 14))
+        scheduler = yield self.callGet(('masters', 22, 'schedulers', 14))
 
-        @d.addCallback
-        def check(scheduler):
-            self.validateData(scheduler)
-            self.assertEqual(scheduler['name'], 'other:scheduler')
-        return d
+        self.validateData(scheduler)
+        self.assertEqual(scheduler['name'], 'other:scheduler')
 
+    @defer.inlineCallbacks
     def test_get_masterid_no_match(self):
-        d = self.callGet(('masters', 33, 'schedulers', 13))
+        scheduler = yield self.callGet(('masters', 33, 'schedulers', 13))
 
-        @d.addCallback
-        def check(scheduler):
-            self.assertEqual(scheduler, None)
-        return d
+        self.assertEqual(scheduler, None)
 
+    @defer.inlineCallbacks
     def test_get_masterid_missing(self):
-        d = self.callGet(('masters', 99, 'schedulers', 13))
+        scheduler = yield self.callGet(('masters', 99, 'schedulers', 13))
 
-        @d.addCallback
-        def check(scheduler):
-            self.assertEqual(scheduler, None)
-        return d
+        self.assertEqual(scheduler, None)
 
+    @defer.inlineCallbacks
     def test_get_missing(self):
-        d = self.callGet(('schedulers', 99))
+        scheduler = yield self.callGet(('schedulers', 99))
 
-        @d.addCallback
-        def check(scheduler):
-            self.assertEqual(scheduler, None)
-        return d
+        self.assertEqual(scheduler, None)
+
+    @defer.inlineCallbacks
+    def test_action_enable(self):
+        r = yield self.callControl("enable", {'enabled': False}, ('schedulers', 13))
+        self.assertEqual(r, None)
 
 
 class SchedulersEndpoint(endpoint.EndpointMixin, unittest.TestCase):
@@ -121,46 +117,73 @@ class SchedulersEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def tearDown(self):
         self.tearDownEndpoint()
 
+    @defer.inlineCallbacks
     def test_get(self):
-        d = self.callGet(('schedulers',))
+        schedulers = yield self.callGet(('schedulers',))
 
-        @d.addCallback
-        def check(schedulers):
-            [self.validateData(m) for m in schedulers]
-            self.assertEqual(sorted([m['schedulerid'] for m in schedulers]),
-                             [13, 14, 15, 16])
-        return d
+        [self.validateData(m) for m in schedulers]
+        self.assertEqual(sorted([m['schedulerid'] for m in schedulers]),
+                         [13, 14, 15, 16])
 
+    @defer.inlineCallbacks
     def test_get_masterid(self):
-        d = self.callGet(('masters', 33, 'schedulers'))
+        schedulers = yield self.callGet(('masters', 33, 'schedulers'))
 
-        @d.addCallback
-        def check(schedulers):
-            [self.validateData(m) for m in schedulers]
-            self.assertEqual(sorted([m['schedulerid'] for m in schedulers]),
-                             [15, 16])
-        return d
+        [self.validateData(m) for m in schedulers]
+        self.assertEqual(sorted([m['schedulerid'] for m in schedulers]),
+                         [15, 16])
 
+    @defer.inlineCallbacks
     def test_get_masterid_missing(self):
-        d = self.callGet(('masters', 23, 'schedulers'))
+        schedulers = yield self.callGet(('masters', 23, 'schedulers'))
 
-        @d.addCallback
-        def check(schedulers):
-            self.assertEqual(schedulers, [])
-        return d
-
-    def test_startConsuming(self):
-        return self.callStartConsuming({}, {},
-                                       expected_filter=('schedulers',
-                                                        None, None))
+        self.assertEqual(schedulers, [])
 
 
-class Scheduler(interfaces.InterfaceTests, unittest.TestCase):
+class Scheduler(TestReactorMixin, interfaces.InterfaceTests,
+                unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(wantMq=True, wantDb=True,
-                                             wantData=True, testcase=self)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=True, wantDb=True,
+                                             wantData=True)
         self.rtype = schedulers.Scheduler(self.master)
+
+    def test_signature_schedulerEnable(self):
+        @self.assertArgSpecMatches(
+            self.master.data.updates.schedulerEnable,
+            self.rtype.schedulerEnable)
+        def schedulerEnable(self, schedulerid, v):
+            pass
+
+    @defer.inlineCallbacks
+    def test_schedulerEnable(self):
+        SOMETIME = 1348971992
+        yield self.master.db.insertTestData([
+            fakedb.Master(id=22, active=0, last_active=SOMETIME),
+            fakedb.Scheduler(id=13, name='some:scheduler'),
+            fakedb.SchedulerMaster(schedulerid=13, masterid=22),
+        ])
+        yield self.rtype.schedulerEnable(13, False)
+        self.master.mq.assertProductions(
+            [(('schedulers', '13', 'updated'),
+              {'enabled': False,
+               'master': {'active': False,
+                          'last_active': epoch2datetime(SOMETIME),
+                          'masterid': 22,
+                          'name': 'some:master'},
+               'name': 'some:scheduler',
+               'schedulerid': 13})])
+        yield self.rtype.schedulerEnable(13, True)
+        self.master.mq.assertProductions(
+            [(('schedulers', '13', 'updated'),
+              {'enabled': True,
+               'master': {'active': False,
+                          'last_active': epoch2datetime(SOMETIME),
+                          'masterid': 22,
+                          'name': 'some:master'},
+               'name': 'some:scheduler',
+               'schedulerid': 13})])
 
     def test_signature_findSchedulerId(self):
         @self.assertArgSpecMatches(
@@ -173,8 +196,8 @@ class Scheduler(interfaces.InterfaceTests, unittest.TestCase):
     def test_findSchedulerId(self):
         self.master.db.schedulers.findSchedulerId = mock.Mock(
             return_value=defer.succeed(10))
-        self.assertEqual((yield self.rtype.findSchedulerId(u'sch')), 10)
-        self.master.db.schedulers.findSchedulerId.assert_called_with(u'sch')
+        self.assertEqual((yield self.rtype.findSchedulerId('sch')), 10)
+        self.master.db.schedulers.findSchedulerId.assert_called_with('sch')
 
     def test_signature_trySetSchedulerMaster(self):
         @self.assertArgSpecMatches(
@@ -216,7 +239,7 @@ class Scheduler(interfaces.InterfaceTests, unittest.TestCase):
         except RuntimeError:
             pass
         else:
-            self.fail("The RuntimeError did not propogate")
+            self.fail("The RuntimeError did not propagate")
 
     @defer.inlineCallbacks
     def test__masterDeactivated(self):

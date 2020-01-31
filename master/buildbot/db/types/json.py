@@ -13,7 +13,9 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.util import json
+
+import json
+
 from sqlalchemy.types import Text
 from sqlalchemy.types import TypeDecorator
 

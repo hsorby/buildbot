@@ -5,7 +5,7 @@ LogObservers
 
 .. py:class:: LogObserver
 
-    This is a base class for objects which receive logs from slave commands as they are produced.
+    This is a base class for objects which receive logs from worker commands as they are produced.
     It does not provide an interface for reading logs - such access should occur directly through the Data API.
 
     See :ref:`Adding-LogObservers` for help creating and using a custom log observer.
@@ -98,7 +98,7 @@ LogObservers
 
     .. warning::
 
-        This use of generator functions is a simple Python idiom first described in [PEP 342](http://www.python.org/dev/peps/pep-0342/).
+        This use of generator functions is a simple Python idiom first described in `PEP 342 <https://www.python.org/dev/peps/pep-0342/>`__.
         It is unrelated to the generators used in ``inlineCallbacks``.
         In fact, consumers of this type are incompatible with asynchronous programming, as each line must be processed immediately.
 

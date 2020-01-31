@@ -13,27 +13,26 @@
 #
 # Copyright Buildbot Team Members
 
-from zope.interface import implements
+from twisted.internet import defer
+from twisted.python import failure
+from zope.interface import implementer
 
 from buildbot.interfaces import ITriggerableScheduler
 from buildbot.process.properties import Properties
 from buildbot.schedulers import base
 from buildbot.util import debounce
-from twisted.internet import defer
-from twisted.python import failure
 
 
+@implementer(ITriggerableScheduler)
 class Triggerable(base.BaseScheduler):
-    implements(ITriggerableScheduler)
 
-    compare_attrs = base.BaseScheduler.compare_attrs
+    compare_attrs = base.BaseScheduler.compare_attrs + ('reason',)
 
-    def __init__(self, name, builderNames, properties={}, **kwargs):
-        base.BaseScheduler.__init__(self, name, builderNames, properties,
-                                    **kwargs)
+    def __init__(self, name, builderNames, reason=None, **kwargs):
+        super().__init__(name, builderNames, **kwargs)
         self._waiters = {}
         self._buildset_complete_consumer = None
-        self.reason = u"The Triggerable scheduler named '%s' triggered this build" % name
+        self.reason = reason
 
     def trigger(self, waited_for, sourcestamps=None, set_props=None,
                 parent_buildid=None, parent_relationship=None):
@@ -45,14 +44,20 @@ class Triggerable(base.BaseScheduler):
         # potentially overridden by anything from the triggering build
         props = Properties()
         props.updateFromProperties(self.properties)
+
+        reason = self.reason
         if set_props:
             props.updateFromProperties(set_props)
+            reason = set_props.getProperty('reason')
+
+        if reason is None:
+            reason = "The Triggerable scheduler named '%s' triggered this build" % self.name
 
         # note that this does not use the buildset subscriptions mechanism, as
         # the duration of interest to the caller is bounded by the lifetime of
         # this process.
         idsDeferred = self.addBuildsetForSourceStampsWithDefaults(
-            self.reason,
+            reason,
             sourcestamps, waited_for,
             properties=props,
             parent_buildid=parent_buildid,
@@ -60,18 +65,18 @@ class Triggerable(base.BaseScheduler):
 
         resultsDeferred = defer.Deferred()
 
+        @idsDeferred.addCallback
         def setup_waiter(ids):
             bsid, brids = ids
             self._waiters[bsid] = (resultsDeferred, brids)
             self._updateWaiters()
             return ids
 
-        idsDeferred.addCallback(setup_waiter)
         return idsDeferred, resultsDeferred
 
     @defer.inlineCallbacks
     def startService(self):
-        yield base.BaseScheduler.startService(self)
+        yield super().startService()
         self._updateWaiters.start()
 
     @defer.inlineCallbacks
@@ -91,7 +96,7 @@ class Triggerable(base.BaseScheduler):
                 d.errback(failure.Failure(RuntimeError(msg)))
             self._waiters = {}
 
-        yield base.BaseScheduler.stopService(self)
+        yield super().stopService()
 
     @debounce.method(wait=0)
     @defer.inlineCallbacks

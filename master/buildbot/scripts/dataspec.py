@@ -14,21 +14,23 @@
 # Copyright Buildbot Team Members
 
 
+import json
 import os
 import sys
+
+from twisted.internet import defer
 
 from buildbot.data import connector
 from buildbot.test.fake import fakemaster
 from buildbot.util import in_reactor
-from buildbot.util import json
-from twisted.internet import defer
 
 
 @in_reactor
 @defer.inlineCallbacks
 def dataspec(config):
-    master = yield fakemaster.make_master()
-    data = connector.DataConnector(master)
+    master = yield fakemaster.make_master(None, wantRealReactor=True)
+    data = connector.DataConnector()
+    yield data.setServiceParent(master)
     if config['out'] != '--':
         dirs = os.path.dirname(config['out'])
         if dirs and not os.path.exists(dirs):
@@ -40,4 +42,4 @@ def dataspec(config):
         f.write("window." + config['global'] + '=')
     f.write(json.dumps(data.allEndpoints(), indent=2))
     f.close()
-    defer.returnValue(0)
+    return 0

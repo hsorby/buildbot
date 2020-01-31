@@ -15,6 +15,9 @@
 
 import sqlalchemy as sa
 
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot.db import builds
 from buildbot.db import changes
 from buildbot.db import sourcestamps
@@ -23,10 +26,8 @@ from buildbot.test.fake import fakemaster
 from buildbot.test.util import connector_component
 from buildbot.test.util import interfaces
 from buildbot.test.util import validation
+from buildbot.test.util.misc import TestReactorMixin
 from buildbot.util import epoch2datetime
-from twisted.internet import defer
-from twisted.internet import task
-from twisted.trial import unittest
 
 SOMETIME = 20398573
 OTHERTIME = 937239287
@@ -39,12 +40,12 @@ class Tests(interfaces.InterfaceTests):
     change13_rows = [
         fakedb.SourceStamp(id=92, branch="thirteen"),
         fakedb.Change(changeid=13, author="dustin", comments="fix spelling",
-                      branch="master", revision="deadbeef",
+                      branch="master", revision="deadbeef", committer="justin",
                       when_timestamp=266738400, revlink=None, category=None,
                       repository='', codebase='', project='', sourcestampid=92),
 
         fakedb.ChangeFile(changeid=13, filename='master/README.txt'),
-        fakedb.ChangeFile(changeid=13, filename='slave/README.txt'),
+        fakedb.ChangeFile(changeid=13, filename='worker/README.txt'),
 
         fakedb.ChangeProperty(changeid=13, property_name='notest',
                               property_value='["no","Change"]'),
@@ -53,7 +54,7 @@ class Tests(interfaces.InterfaceTests):
     change14_rows = [
         fakedb.SourceStamp(id=233, branch="fourteen"),
         fakedb.Change(changeid=14, author="warner", comments="fix whitespace",
-                      branch="warnerdb", revision="0e92a098b",
+                      branch="warnerdb", revision="0e92a098b", committer="david",
                       when_timestamp=266738404, revlink='http://warner/0e92a098b',
                       category='devel', repository='git://warner', codebase='mainapp',
                       project='Buildbot', sourcestampid=233),
@@ -64,17 +65,18 @@ class Tests(interfaces.InterfaceTests):
     change14_dict = {
         'changeid': 14,
         'parent_changeids': [],
-        'author': u'warner',
-        'branch': u'warnerdb',
-        'category': u'devel',
-        'comments': u'fix whitespace',
-        'files': [u'master/buildbot/__init__.py'],
-        'project': u'Buildbot',
+        'author': 'warner',
+        'committer': 'david',
+        'branch': 'warnerdb',
+        'category': 'devel',
+        'comments': 'fix whitespace',
+        'files': ['master/buildbot/__init__.py'],
+        'project': 'Buildbot',
         'properties': {},
-        'repository': u'git://warner',
-        'codebase': u'mainapp',
-        'revision': u'0e92a098b',
-        'revlink': u'http://warner/0e92a098b',
+        'repository': 'git://warner',
+        'codebase': 'mainapp',
+        'revision': '0e92a098b',
+        'revlink': 'http://warner/0e92a098b',
         'when_timestamp': epoch2datetime(266738404),
         'sourcestampid': 233,
     }
@@ -83,9 +85,9 @@ class Tests(interfaces.InterfaceTests):
 
     def test_signature_addChange(self):
         @self.assertArgSpecMatches(self.db.changes.addChange)
-        def addChange(self, author=None, files=None, comments=None, is_dir=None,
+        def addChange(self, author=None, committer=None, files=None, comments=None, is_dir=None,
                       revision=None, when_timestamp=None, branch=None, category=None,
-                      revlink='', properties={}, repository='', codebase='',
+                      revlink='', properties=None, repository='', codebase='',
                       project='', uid=None):
             pass
 
@@ -96,53 +98,53 @@ class Tests(interfaces.InterfaceTests):
 
     @defer.inlineCallbacks
     def test_addChange_getChange(self):
-        clock = task.Clock()
-        clock.advance(SOMETIME)
+        self.reactor.advance(SOMETIME)
         changeid = yield self.db.changes.addChange(
-            author=u'dustin',
+            author='dustin',
+            committer='justin',
             files=[],
-            comments=u'fix spelling',
-            revision=u'2d6caa52',
+            comments='fix spelling',
+            revision='2d6caa52',
             when_timestamp=epoch2datetime(OTHERTIME),
-            branch=u'master',
+            branch='master',
             category=None,
             revlink=None,
             properties={},
-            repository=u'repo://',
-            codebase=u'cb',
-            project=u'proj',
-            _reactor=clock)
+            repository='repo://',
+            codebase='cb',
+            project='proj')
         chdict = yield self.db.changes.getChange(changeid)
         validation.verifyDbDict(self, 'chdict', chdict)
         chdict = chdict.copy()
         ss = yield self.db.sourcestamps.getSourceStamp(chdict['sourcestampid'])
         chdict['sourcestampid'] = ss
         self.assertEqual(chdict, {
-            'author': u'dustin',
-            'branch': u'master',
+            'author': 'dustin',
+            'committer': 'justin',
+            'branch': 'master',
             'category': None,
             'changeid': changeid,
             'parent_changeids': [],
-            'codebase': u'cb',
-            'comments': u'fix spelling',
+            'codebase': 'cb',
+            'comments': 'fix spelling',
             'files': [],
-            'project': u'proj',
+            'project': 'proj',
             'properties': {},
-            'repository': u'repo://',
-            'revision': u'2d6caa52',
+            'repository': 'repo://',
+            'revision': '2d6caa52',
             'revlink': None,
             'sourcestampid': {
-                'branch': u'master',
-                'codebase': u'cb',
+                'branch': 'master',
+                'codebase': 'cb',
                 'patch_author': None,
                 'patch_body': None,
                 'patch_comment': None,
                 'patch_level': None,
                 'patch_subdir': None,
                 'patchid': None,
-                'project': u'proj',
-                'repository': u'repo://',
-                'revision': u'2d6caa52',
+                'project': 'proj',
+                'repository': 'repo://',
+                'revision': '2d6caa52',
                 'created_at': epoch2datetime(SOMETIME),
                 'ssid': ss['ssid'],
             },
@@ -153,44 +155,44 @@ class Tests(interfaces.InterfaceTests):
     def test_addChange_withParent(self):
         yield self.insertTestData(self.change14_rows)
 
-        clock = task.Clock()
-        clock.advance(SOMETIME)
+        self.reactor.advance(SOMETIME)
         changeid = yield self.db.changes.addChange(
-            author=u'delanne',
+            author='delanne',
+            committer='melanne',
             files=[],
-            comments=u'child of changeid14',
-            revision=u'50adad56',
+            comments='child of changeid14',
+            revision='50adad56',
             when_timestamp=epoch2datetime(OTHERTIME),
-            branch=u'warnerdb',
-            category=u'devel',
+            branch='warnerdb',
+            category='devel',
             revlink=None,
             properties={},
-            repository=u'git://warner',
-            codebase=u'mainapp',
-            project=u'Buildbot',
-            _reactor=clock)
+            repository='git://warner',
+            codebase='mainapp',
+            project='Buildbot')
         chdict = yield self.db.changes.getChange(changeid)
         validation.verifyDbDict(self, 'chdict', chdict)
         chdict = chdict.copy()
         ss = yield self.db.sourcestamps.getSourceStamp(chdict['sourcestampid'])
         chdict['sourcestampid'] = ss
         self.assertEqual(chdict, {
-            'author': u'delanne',
-            'branch': u'warnerdb',
-            'category': u'devel',
+            'author': 'delanne',
+            'committer': 'melanne',
+            'branch': 'warnerdb',
+            'category': 'devel',
             'changeid': changeid,
             'parent_changeids': [14],
-            'codebase': u'mainapp',
-            'comments': u'child of changeid14',
+            'codebase': 'mainapp',
+            'comments': 'child of changeid14',
             'files': [],
-            'project': u'Buildbot',
+            'project': 'Buildbot',
             'properties': {},
-            'repository': u'git://warner',
-            'revision': u'50adad56',
+            'repository': 'git://warner',
+            'revision': '50adad56',
             'revlink': None,
             'sourcestampid': {
-                'branch': u'warnerdb',
-                'codebase': u'mainapp',
+                'branch': 'warnerdb',
+                'codebase': 'mainapp',
                 'created_at': epoch2datetime(SOMETIME),
                 'patch_author': None,
                 'patch_body': None,
@@ -198,67 +200,54 @@ class Tests(interfaces.InterfaceTests):
                 'patch_level': None,
                 'patch_subdir': None,
                 'patchid': None,
-                'project': u'Buildbot',
-                'repository': u'git://warner',
-                'revision': u'50adad56',
+                'project': 'Buildbot',
+                'repository': 'git://warner',
+                'revision': '50adad56',
                 'ssid': ss['ssid']
             },
             'when_timestamp': epoch2datetime(OTHERTIME),
         })
 
+    @defer.inlineCallbacks
     def test_getChange_chdict(self):
-        d = self.insertTestData(self.change14_rows)
+        yield self.insertTestData(self.change14_rows)
 
-        def get14(_):
-            return self.db.changes.getChange(14)
-        d.addCallback(get14)
+        chdict = yield self.db.changes.getChange(14)
 
-        def check14(chdict):
-            validation.verifyDbDict(self, 'chdict', chdict)
-            self.assertEqual(chdict, self.change14_dict)
-        d.addCallback(check14)
-        return d
+        validation.verifyDbDict(self, 'chdict', chdict)
+        self.assertEqual(chdict, self.change14_dict)
 
+    @defer.inlineCallbacks
     def test_getChange_missing(self):
-        d = defer.succeed(None)
+        chdict = yield self.db.changes.getChange(14)
 
-        def get14(_):
-            return self.db.changes.getChange(14)
-        d.addCallback(get14)
-
-        def check14(chdict):
-            self.failUnless(chdict is None)
-        d.addCallback(check14)
-        return d
+        self.assertTrue(chdict is None)
 
     def test_signature_getChangeUids(self):
         @self.assertArgSpecMatches(self.db.changes.getChangeUids)
         def getChangeUids(self, changeid):
             pass
 
+    @defer.inlineCallbacks
     def test_getChangeUids_missing(self):
-        d = self.db.changes.getChangeUids(1)
+        res = yield self.db.changes.getChangeUids(1)
 
-        def check(res):
-            self.assertEqual(res, [])
-        d.addCallback(check)
-        return d
+        self.assertEqual(res, [])
 
+    @defer.inlineCallbacks
     def test_getChangeUids_found(self):
-        d = self.insertTestData(self.change14_rows + [
+        yield self.insertTestData(self.change14_rows + [
             fakedb.SourceStamp(id=92),
             fakedb.User(uid=1),
             fakedb.ChangeUser(changeid=14, uid=1),
         ])
-        d.addCallback(lambda _: self.db.changes.getChangeUids(14))
+        res = yield self.db.changes.getChangeUids(14)
 
-        def check(res):
-            self.assertEqual(res, [1])
-        d.addCallback(check)
-        return d
+        self.assertEqual(res, [1])
 
+    @defer.inlineCallbacks
     def test_getChangeUids_multi(self):
-        d = self.insertTestData(self.change14_rows + self.change13_rows + [
+        yield self.insertTestData(self.change14_rows + self.change13_rows + [
             fakedb.User(uid=1, identifier="one"),
             fakedb.User(uid=2, identifier="two"),
             fakedb.User(uid=99, identifier="nooo"),
@@ -266,12 +255,9 @@ class Tests(interfaces.InterfaceTests):
             fakedb.ChangeUser(changeid=14, uid=2),
             fakedb.ChangeUser(changeid=13, uid=99),  # not selected
         ])
-        d.addCallback(lambda _: self.db.changes.getChangeUids(14))
+        res = yield self.db.changes.getChangeUids(14)
 
-        def check(res):
-            self.assertEqual(sorted(res), [1, 2])
-        d.addCallback(check)
-        return d
+        self.assertEqual(sorted(res), [1, 2])
 
     def test_signature_getRecentChanges(self):
         @self.assertArgSpecMatches(self.db.changes.getRecentChanges)
@@ -293,58 +279,45 @@ class Tests(interfaces.InterfaceTests):
             fakedb.Change(changeid=12, sourcestampid=922),
         ] + self.change13_rows + self.change14_rows)
 
+    @defer.inlineCallbacks
     def test_getRecentChanges_subset(self):
-        d = self.insert7Changes()
-        d.addCallback(lambda _:
-                      self.db.changes.getRecentChanges(5))
+        yield self.insert7Changes()
+        changes = yield self.db.changes.getRecentChanges(5)
 
-        def check(changes):
-            changeids = [c['changeid'] for c in changes]
-            self.assertEqual(changeids, [10, 11, 12, 13, 14])
-        d.addCallback(check)
-        return d
+        changeids = [c['changeid'] for c in changes]
+        self.assertEqual(changeids, [10, 11, 12, 13, 14])
 
+    @defer.inlineCallbacks
     def test_getChangesCount(self):
-        d = self.insert7Changes()
-        d.addCallback(lambda _:
-                      self.db.changes.getChangesCount())
+        yield self.insert7Changes()
+        n = yield self.db.changes.getChangesCount()
 
-        def check(n):
-            self.assertEqual(n, 7)
-        d.addCallback(check)
-        return d
+        self.assertEqual(n, 7)
 
+    @defer.inlineCallbacks
     def test_getChangesHugeCount(self):
-        d = self.insertTestData([
+        yield self.insertTestData([
             fakedb.SourceStamp(id=92),
         ] + [
-            fakedb.Change(changeid=i) for i in xrange(2, 102)])
-        d.addCallback(lambda _:
-                      self.db.changes.getChangesCount())
+            fakedb.Change(changeid=i) for i in range(2, 102)])
+        n = yield self.db.changes.getChangesCount()
 
-        def check(n):
-            self.assertEqual(n, 100)
-        d.addCallback(check)
-        return d
+        self.assertEqual(n, 100)
 
+    @defer.inlineCallbacks
     def test_getRecentChanges_empty(self):
-        d = defer.succeed(None)
-        d.addCallback(lambda _:
-                      self.db.changes.getRecentChanges(5))
+        changes = yield self.db.changes.getRecentChanges(5)
 
-        def check(changes):
-            changeids = [c['changeid'] for c in changes]
-            self.assertEqual(changeids, [])
-        d.addCallback(check)
-        d.addCallback(lambda _:
-                      self.db.changes.getChanges())
-        d.addCallback(check)
-        return d
+        changeids = [c['changeid'] for c in changes]
+        self.assertEqual(changeids, [])
+        yield self.db.changes.getChanges()
 
+        changeids = [c['changeid'] for c in changes]
+        self.assertEqual(changeids, [])
+
+    @defer.inlineCallbacks
     def test_getRecentChanges_missing(self):
-        d = self.insertTestData(self.change13_rows + self.change14_rows)
-        d.addCallback(lambda _:
-                      self.db.changes.getRecentChanges(5))
+        yield self.insertTestData(self.change13_rows + self.change14_rows)
 
         def check(changes):
             # requested all, but only got 2
@@ -354,282 +327,242 @@ class Tests(interfaces.InterfaceTests):
             self.assertEqual(changeids, [13, 14])
             # double-check that they have .files, etc.
             self.assertEqual(sorted(changes[0]['files']),
-                             sorted(['master/README.txt', 'slave/README.txt']))
+                             sorted(['master/README.txt', 'worker/README.txt']))
             self.assertEqual(changes[0]['properties'],
                              {'notest': ('no', 'Change')})
-        d.addCallback(check)
-        d.addCallback(lambda _:
-                      self.db.changes.getChanges())
-        d.addCallback(check)
-        return d
+
+        changes = yield self.db.changes.getRecentChanges(5)
+        check(changes)
+
+        changes = yield self.db.changes.getChanges()
+        check(changes)
 
     def test_signature_getLatestChangeid(self):
         @self.assertArgSpecMatches(self.db.changes.getLatestChangeid)
         def getLatestChangeid(self):
             pass
 
+    @defer.inlineCallbacks
     def test_getLatestChangeid(self):
-        d = self.insertTestData(self.change13_rows)
+        yield self.insertTestData(self.change13_rows)
 
-        def get(_):
-            return self.db.changes.getLatestChangeid()
-        d.addCallback(get)
+        changeid = yield self.db.changes.getLatestChangeid()
 
-        def check(changeid):
-            self.assertEqual(changeid, 13)
-        d.addCallback(check)
-        return d
+        self.assertEqual(changeid, 13)
 
+    @defer.inlineCallbacks
     def test_getLatestChangeid_empty(self):
-        d = defer.succeed(None)
+        changeid = yield self.db.changes.getLatestChangeid()
 
-        def get(_):
-            return self.db.changes.getLatestChangeid()
-        d.addCallback(get)
-
-        def check(changeid):
-            self.assertEqual(changeid, None)
-        d.addCallback(check)
-        return d
+        self.assertEqual(changeid, None)
 
     def test_signature_getParentChangeIds(self):
         @self.assertArgSpecMatches(self.db.changes.getParentChangeIds)
         def getParentChangeIds(self, branch, repository, project, codebase):
             pass
 
+    @defer.inlineCallbacks
     def test_getParentChangeIds(self):
-        d = self.insertTestData(self.change14_rows + self.change13_rows)
+        yield self.insertTestData(self.change14_rows + self.change13_rows)
 
-        def getParent(_):
-            return self.db.changes.getParentChangeIds(branch='warnerdb',
+        changeid = yield self.db.changes.getParentChangeIds(branch='warnerdb',
                                                       repository='git://warner',
                                                       project='Buildbot',
                                                       codebase='mainapp')
-        d.addCallback(getParent)
-
-        def check(changeid):
-            self.assertEqual(changeid, [14])
-        d.addCallback(check)
-        return d
+        self.assertEqual(changeid, [14])
 
 
 class RealTests(Tests):
 
     # tests that only "real" implementations will pass
 
+    @defer.inlineCallbacks
     def test_addChange(self):
-        clock = task.Clock()
-        clock.advance(SOMETIME)
-        d = self.db.changes.addChange(
-            author=u'dustin',
-            files=[u'master/LICENSING.txt', u'slave/LICENSING.txt'],
-            comments=u'fix spelling',
-            revision=u'2d6caa52',
+        self.reactor.advance(SOMETIME)
+        changeid = yield self.db.changes.addChange(
+            author='dustin',
+            committer='justin',
+            files=['master/LICENSING.txt', 'worker/LICENSING.txt'],
+            comments='fix spelling',
+            revision='2d6caa52',
             when_timestamp=epoch2datetime(266738400),
-            branch=u'master',
+            branch='master',
             category=None,
             revlink=None,
-            properties={u'platform': (u'linux', 'Change')},
-            repository=u'',
-            codebase=u'cb',
-            project=u'',
-            _reactor=clock)
+            properties={'platform': ('linux', 'Change')},
+            repository='',
+            codebase='cb',
+            project='')
         # check all of the columns of the four relevant tables
 
-        def check_change(changeid):
-            def thd(conn):
-                self.assertEqual(changeid, 1)
-                r = conn.execute(self.db.model.changes.select())
-                r = r.fetchall()
-                self.assertEqual(len(r), 1)
-                self.assertEqual(r[0].changeid, changeid)
-                self.assertEqual(r[0].author, 'dustin')
-                self.assertEqual(r[0].comments, 'fix spelling')
-                self.assertEqual(r[0].branch, 'master')
-                self.assertEqual(r[0].revision, '2d6caa52')
-                self.assertEqual(r[0].when_timestamp, 266738400)
-                self.assertEqual(r[0].category, None)
-                self.assertEqual(r[0].repository, '')
-                self.assertEqual(r[0].codebase, u'cb')
-                self.assertEqual(r[0].project, '')
-                self.assertEqual(r[0].sourcestampid, 1)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change)
+        def thd_change(conn):
+            self.assertEqual(changeid, 1)
+            r = conn.execute(self.db.model.changes.select())
+            r = r.fetchall()
+            self.assertEqual(len(r), 1)
+            self.assertEqual(r[0].changeid, changeid)
+            self.assertEqual(r[0].author, 'dustin')
+            self.assertEqual(r[0].committer, 'justin')
+            self.assertEqual(r[0].comments, 'fix spelling')
+            self.assertEqual(r[0].branch, 'master')
+            self.assertEqual(r[0].revision, '2d6caa52')
+            self.assertEqual(r[0].when_timestamp, 266738400)
+            self.assertEqual(r[0].category, None)
+            self.assertEqual(r[0].repository, '')
+            self.assertEqual(r[0].codebase, 'cb')
+            self.assertEqual(r[0].project, '')
+            self.assertEqual(r[0].sourcestampid, 1)
+        yield self.db.pool.do(thd_change)
 
-        def check_change_files(_):
-            def thd(conn):
-                query = self.db.model.change_files.select()
-                query.where(self.db.model.change_files.c.changeid == 1)
-                query.order_by(self.db.model.change_files.c.filename)
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 2)
-                self.assertEqual(r[0].filename, 'master/LICENSING.txt')
-                self.assertEqual(r[1].filename, 'slave/LICENSING.txt')
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_files)
+        def thd_change_files(conn):
+            query = self.db.model.change_files.select()
+            query.where(self.db.model.change_files.c.changeid == 1)
+            query.order_by(self.db.model.change_files.c.filename)
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 2)
+            self.assertEqual(r[0].filename, 'master/LICENSING.txt')
+            self.assertEqual(r[1].filename, 'worker/LICENSING.txt')
+        yield self.db.pool.do(thd_change_files)
 
-        def check_change_properties(_):
-            def thd(conn):
-                query = self.db.model.change_properties.select()
-                query.where(self.db.model.change_properties.c.changeid == 1)
-                query.order_by(self.db.model.change_properties.c.property_name)
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 1)
-                self.assertEqual(r[0].property_name, 'platform')
-                self.assertEqual(r[0].property_value, '["linux", "Change"]')
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_properties)
+        def thd_change_properties(conn):
+            query = self.db.model.change_properties.select()
+            query.where(self.db.model.change_properties.c.changeid == 1)
+            query.order_by(self.db.model.change_properties.c.property_name)
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 1)
+            self.assertEqual(r[0].property_name, 'platform')
+            self.assertEqual(r[0].property_value, '["linux", "Change"]')
+        yield self.db.pool.do(thd_change_properties)
 
-        def check_change_users(_):
-            def thd(conn):
-                query = self.db.model.change_users.select()
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 0)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_users)
+        def thd_change_users(conn):
+            query = self.db.model.change_users.select()
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 0)
+        yield self.db.pool.do(thd_change_users)
 
-        def check_change_sourcestamps(_):
-            def thd(conn):
-                query = self.db.model.sourcestamps.select()
-                r = conn.execute(query)
-                self.assertEqual([dict(row) for row in r.fetchall()], [{
-                    'branch': u'master',
-                    'codebase': u'cb',
-                    'id': 1,
-                    'patchid': None,
-                    'project': u'',
-                    'repository': u'',
-                    'revision': u'2d6caa52',
-                    'created_at': SOMETIME,
-                    'ss_hash': 'b777dbd10d1d4c76651335f6a78e278e88b010d6',
-                }])
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_sourcestamps)
-        return d
+        def thd_change_sourcestamps(conn):
+            query = self.db.model.sourcestamps.select()
+            r = conn.execute(query)
+            self.assertEqual([dict(row) for row in r.fetchall()], [{
+                'branch': 'master',
+                'codebase': 'cb',
+                'id': 1,
+                'patchid': None,
+                'project': '',
+                'repository': '',
+                'revision': '2d6caa52',
+                'created_at': SOMETIME,
+                'ss_hash': 'b777dbd10d1d4c76651335f6a78e278e88b010d6',
+            }])
+        yield self.db.pool.do(thd_change_sourcestamps)
 
+    @defer.inlineCallbacks
     def test_addChange_when_timestamp_None(self):
-        clock = task.Clock()
-        clock.advance(OTHERTIME)
-        d = self.db.changes.addChange(
-            author=u'dustin',
+        self.reactor.advance(OTHERTIME)
+        changeid = yield self.db.changes.addChange(
+            author='dustin',
+            committer='justin',
             files=[],
-            comments=u'fix spelling',
-            revision=u'2d6caa52',
+            comments='fix spelling',
+            revision='2d6caa52',
             when_timestamp=None,
-            branch=u'master',
+            branch='master',
             category=None,
             revlink=None,
             properties={},
-            repository=u'',
-            codebase=u'',
-            project=u'',
-            _reactor=clock)
+            repository='',
+            codebase='',
+            project='')
         # check all of the columns of the four relevant tables
 
-        def check_change(changeid):
-            def thd(conn):
-                r = conn.execute(self.db.model.changes.select())
-                r = r.fetchall()
-                self.assertEqual(len(r), 1)
-                self.assertEqual(r[0].changeid, changeid)
-                self.assertEqual(r[0].when_timestamp, OTHERTIME)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change)
+        def thd(conn):
+            r = conn.execute(self.db.model.changes.select())
+            r = r.fetchall()
+            self.assertEqual(len(r), 1)
+            self.assertEqual(r[0].changeid, changeid)
+            self.assertEqual(r[0].when_timestamp, OTHERTIME)
+        yield self.db.pool.do(thd)
 
-        def check_change_files(_):
-            def thd(conn):
-                query = self.db.model.change_files.select()
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 0)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_files)
+        def thd_change(conn):
+            query = self.db.model.change_files.select()
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 0)
+        yield self.db.pool.do(thd_change)
 
-        def check_change_properties(_):
-            def thd(conn):
-                query = self.db.model.change_properties.select()
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 0)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_properties)
+        def thd_change_file(conn):
+            query = self.db.model.change_properties.select()
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 0)
+        yield self.db.pool.do(thd_change_file)
 
-        def check_change_users(_):
-            def thd(conn):
-                query = self.db.model.change_users.select()
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 0)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_users)
-        return d
+        def thd_change_properties(conn):
+            query = self.db.model.change_users.select()
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 0)
+        yield self.db.pool.do(thd_change_properties)
 
+    @defer.inlineCallbacks
     def test_addChange_with_uid(self):
-        d = self.insertTestData([
+        yield self.insertTestData([
             fakedb.User(uid=1, identifier="one"),
         ])
-        d.addCallback(lambda _:
-                      self.db.changes.addChange(
-                          author=u'dustin',
+        changeid = yield self.db.changes.addChange(
+                          author='dustin',
+                          committer='justin',
                           files=[],
-                          comments=u'fix spelling',
-                          revision=u'2d6caa52',
+                          comments='fix spelling',
+                          revision='2d6caa52',
                           when_timestamp=epoch2datetime(OTHERTIME),
-                          branch=u'master',
+                          branch='master',
                           category=None,
                           revlink=None,
                           properties={},
-                          repository=u'',
-                          codebase=u'',
-                          project=u'',
-                          uid=1))
+                          repository='',
+                          codebase='',
+                          project='',
+                          uid=1)
         # check all of the columns of the five relevant tables
 
-        def check_change(changeid):
-            def thd(conn):
-                r = conn.execute(self.db.model.changes.select())
-                r = r.fetchall()
-                self.assertEqual(len(r), 1)
-                self.assertEqual(r[0].changeid, changeid)
-                self.assertEqual(r[0].when_timestamp, OTHERTIME)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change)
+        def thd_change(conn):
+            r = conn.execute(self.db.model.changes.select())
+            r = r.fetchall()
+            self.assertEqual(len(r), 1)
+            self.assertEqual(r[0].changeid, changeid)
+            self.assertEqual(r[0].when_timestamp, OTHERTIME)
+        yield self.db.pool.do(thd_change)
 
-        def check_change_files(_):
-            def thd(conn):
-                query = self.db.model.change_files.select()
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 0)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_files)
+        def thd_change_files(conn):
+            query = self.db.model.change_files.select()
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 0)
+        yield self.db.pool.do(thd_change_files)
 
-        def check_change_properties(_):
-            def thd(conn):
-                query = self.db.model.change_properties.select()
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 0)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_properties)
+        def thd_change_properties(conn):
+            query = self.db.model.change_properties.select()
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 0)
+        yield self.db.pool.do(thd_change_properties)
 
-        def check_change_users(_):
-            def thd(conn):
-                query = self.db.model.change_users.select()
-                r = conn.execute(query)
-                r = r.fetchall()
-                self.assertEqual(len(r), 1)
-                self.assertEqual(r[0].changeid, 1)
-                self.assertEqual(r[0].uid, 1)
-            return self.db.pool.do(thd)
-        d.addCallback(check_change_users)
-        return d
+        def thd_change_users(conn):
+            query = self.db.model.change_users.select()
+            r = conn.execute(query)
+            r = r.fetchall()
+            self.assertEqual(len(r), 1)
+            self.assertEqual(r[0].changeid, 1)
+            self.assertEqual(r[0].uid, 1)
+        yield self.db.pool.do(thd_change_users)
 
+    @defer.inlineCallbacks
     def test_pruneChanges(self):
-        d = self.insertTestData([
+        yield self.insertTestData([
             fakedb.Scheduler(id=29),
             fakedb.SourceStamp(id=234, branch='aa'),
             fakedb.SourceStamp(id=235, branch='bb'),
@@ -645,73 +578,68 @@ class RealTests(Tests):
         )
 
         # pruning with a horizon of 2 should delete changes 11, 12 and 13
-        d.addCallback(lambda _: self.db.changes.pruneChanges(2))
+        yield self.db.changes.pruneChanges(2)
 
-        def check(_):
-            def thd(conn):
-                results = {}
-                for tbl_name in ('scheduler_changes', 'change_files',
-                                 'change_properties', 'changes'):
-                    tbl = self.db.model.metadata.tables[tbl_name]
-                    res = conn.execute(sa.select([tbl.c.changeid]))
-                    results[tbl_name] = sorted([row[0] for row in res.fetchall()])
-                self.assertEqual(results, {
-                    'scheduler_changes': [14],
-                    'change_files': [14],
-                    'change_properties': [],
-                    'changes': [14, 15],
-                })
-            return self.db.pool.do(thd)
-        d.addCallback(check)
-        return d
+        def thd(conn):
+            results = {}
+            for tbl_name in ('scheduler_changes', 'change_files',
+                             'change_properties', 'changes'):
+                tbl = self.db.model.metadata.tables[tbl_name]
+                res = conn.execute(sa.select([tbl.c.changeid]))
+                results[tbl_name] = sorted(
+                    [row[0] for row in res.fetchall()])
+            self.assertEqual(results, {
+                'scheduler_changes': [14],
+                'change_files': [14],
+                'change_properties': [],
+                'changes': [14, 15],
+            })
+        yield self.db.pool.do(thd)
 
+    @defer.inlineCallbacks
     def test_pruneChanges_lots(self):
-        d = self.insertTestData([
+        yield self.insertTestData([
             fakedb.SourceStamp(id=29),
         ] + [
             fakedb.Change(changeid=n, sourcestampid=29)
-            for n in xrange(1, 151)
+            for n in range(1, 151)
         ])
 
-        d.addCallback(lambda _: self.db.changes.pruneChanges(1))
+        yield self.db.changes.pruneChanges(1)
 
-        def check(_):
-            def thd(conn):
-                results = {}
-                for tbl_name in ('scheduler_changes', 'change_files',
-                                 'change_properties', 'changes'):
-                    tbl = self.db.model.metadata.tables[tbl_name]
-                    res = conn.execute(sa.select([tbl.c.changeid]))
-                    results[tbl_name] = len([row for row in res.fetchall()])
-                self.assertEqual(results, {
-                    'scheduler_changes': 0,
-                    'change_files': 0,
-                    'change_properties': 0,
-                    'changes': 1,
-                })
-            return self.db.pool.do(thd)
-        d.addCallback(check)
-        return d
+        def thd(conn):
+            results = {}
+            for tbl_name in ('scheduler_changes', 'change_files',
+                             'change_properties', 'changes'):
+                tbl = self.db.model.metadata.tables[tbl_name]
+                res = conn.execute(sa.select([sa.func.count()]).select_from(tbl))
+                results[tbl_name] = res.fetchone()[0]
+                res.close()
+            self.assertEqual(results, {
+                'scheduler_changes': 0,
+                'change_files': 0,
+                'change_properties': 0,
+                'changes': 1,
+            })
+        yield self.db.pool.do(thd)
 
+    @defer.inlineCallbacks
     def test_pruneChanges_None(self):
-        d = self.insertTestData(self.change13_rows)
+        yield self.insertTestData(self.change13_rows)
 
-        d.addCallback(lambda _: self.db.changes.pruneChanges(None))
+        yield self.db.changes.pruneChanges(None)
 
-        def check(_):
-            def thd(conn):
-                tbl = self.db.model.changes
-                res = conn.execute(tbl.select())
-                self.assertEqual([row.changeid for row in res.fetchall()],
-                                 [13])
-            return self.db.pool.do(thd)
-        d.addCallback(check)
-        return d
+        def thd(conn):
+            tbl = self.db.model.changes
+            res = conn.execute(tbl.select())
+            self.assertEqual([row.changeid for row in res.fetchall()],
+                             [13])
+        yield self.db.pool.do(thd)
 
     @defer.inlineCallbacks
     def test_getChangesForBuild(self):
         rows = [fakedb.Master(id=88, name="bar"),
-                fakedb.Buildslave(id=13, name='one'),
+                fakedb.Worker(id=13, name='one'),
                 fakedb.Builder(id=77, name='A')]
         lastID = {"changeid": 0,
                   "sourcestampid": 0,
@@ -719,27 +647,28 @@ class RealTests(Tests):
                   "buildsetSourceStampid": 0,
                   "buildrequestid": 0,
                   "buildid": 0}
-        codebase_ss = {}
 
-        def addChange(codebase, revision, author, comments, branch='master', category='cat', project='proj', repository='repo'):
+        codebase_ss = {}  # shared state between addChange and addBuild
+
+        def addChange(codebase, revision, author, committer, comments, branch='master', category='cat', project='proj', repository='repo'):
             lastID["sourcestampid"] += 1
             lastID["changeid"] += 1
-            parent_changeids = codebase_ss.get(codebase, [None])[-1]
+            parent_changeids = codebase_ss.get(codebase, None)
 
-            if codebase not in codebase_ss:
-                codebase_ss[codebase] = list()
-            codebase_ss[codebase].append(lastID["sourcestampid"])
+            codebase_ss[codebase] = lastID["sourcestampid"]
 
             changeRows = [fakedb.SourceStamp(id=lastID["sourcestampid"],
                                              codebase=codebase,
                                              revision=revision),
                           fakedb.Change(changeid=lastID["changeid"],
                                         author=author,
+                                        committer=committer,
                                         comments=comments,
                                         revision=revision,
                                         sourcestampid=lastID["sourcestampid"],
                                         parent_changeids=parent_changeids,
-                                        when_timestamp=SOMETIME + lastID["changeid"],
+                                        when_timestamp=SOMETIME +
+                                        lastID["changeid"],
                                         branch=branch,
                                         category=category,
                                         project=project,
@@ -755,14 +684,13 @@ class RealTests(Tests):
             buildRows = [fakedb.Buildset(id=lastID["buildsetid"],
                                          reason='foo',
                                          submitted_at=1300305012, results=-1)]
-            for cb, ss_list in codebase_ss.iteritems():
-                for ss in ss_list:
-                    lastID["buildsetSourceStampid"] += 1
-                    buildRows.append(
-                        fakedb.BuildsetSourceStamp(id=lastID["buildsetSourceStampid"],
-                                                   sourcestampid=ss,
-                                                   buildsetid=lastID["buildsetid"]))
-            codebase_ss = {}
+            for cb, ss in codebase_ss.items():
+                lastID["buildsetSourceStampid"] += 1
+                buildRows.append(
+                    fakedb.BuildsetSourceStamp(id=lastID["buildsetSourceStampid"],
+                                               sourcestampid=ss,
+                                               buildsetid=lastID["buildsetid"]))
+            codebase_ss.clear()
             buildRows.extend([
                 fakedb.BuildRequest(id=lastID["buildrequestid"],
                                     buildsetid=lastID["buildsetid"],
@@ -774,233 +702,59 @@ class RealTests(Tests):
                              masterid=88,
                              builderid=77,
                              state_string="test",
-                             buildslaveid=13,
+                             workerid=13,
                              started_at=SOMETIME + lastID["buildid"],
                              complete_at=SOMETIME + 2 * lastID["buildid"],
                              results=results)])
             return buildRows
 
-        # Build1 has 1 change per code base. build result = success
-        rows.extend(addChange('A', 1, 'franck', '1st commit'))
-        rows.extend(addChange('B', 1, 'alice', '2nd commit'))
-        rows.extend(addChange('C', 1, 'bob', '3rd commit'))
+        # Build1 has 1 change per code base
+        rows.extend(addChange('A', 1, 'franck', 'franck', '1st commit'))
+        rows.extend(addChange('B', 1, 'alice', 'alice', '2nd commit'))
+        rows.extend(addChange('C', 1, 'bob', 'bob', '3rd commit'))
         rows.extend(addBuild(codebase_ss))
-        # Build 2 has only one change for codebase A. build result = success
-        rows.extend(addChange('A', 2, 'delanne', '4th commit'))
+        # Build 2 has only one change for codebase A
+        rows.extend(addChange('A', 2, 'delanne', 'delanne', '4th commit'))
         rows.extend(addBuild(codebase_ss))
-        # Build 3 has only one change for codebase B. build result = success
-        rows.extend(addChange('B', 2, 'bob', '6th commit'))
+        # Build 3 has only one change for codebase B
+        rows.extend(addChange('B', 2, 'bob', 'bob', '6th commit'))
         rows.extend(addBuild(codebase_ss))
-        # Build 4 has no change. build result = success
+        # Build 4 has no change
         rows.extend(addBuild(codebase_ss))
-        # Build 5 has 2 changes for codebase A and 1 change for codebase C. build result = success
-        rows.extend(addChange('A', 3, 'franck', '7th commit'))
-        rows.extend(addChange('A', 4, 'alice', '8th commit'))
-        rows.extend(addChange('B', 3, 'bob', '9th commit'))
+        # Build 5 has 2 changes for codebase A and 1 change for codebase C
+        rows.extend(addChange('A', 3, 'franck', 'franck', '7th commit'))
+        rows.extend(addChange('A', 4, 'alice', 'alice', '8th commit'))
+        rows.extend(addChange('B', 3, 'bob', 'bob', '9th commit'))
         rows.extend(addBuild(codebase_ss))
-        # Build 6 has only one change for codebase C. build result = failure
-        rows.extend(addChange('C', 2, 'bob', '10th commit'))
+        # Build 6 has only one change for codebase C
+        rows.extend(addChange('C', 2, 'bob', 'bob', '10th commit'))
         rows.extend(addBuild(codebase_ss, 2))
-        # Build 7 has only one change for codebase C. build result = success
-        rows.extend(addChange('C', 3, 'bob', '11th commit'))
+        # Build 7 has only one change for codebase C
+        rows.extend(addChange('C', 3, 'bob', 'bob', '11th commit'))
         rows.extend(addBuild(codebase_ss, 2))
         yield self.insertTestData(rows)
 
-        expected_1stBuild = [{'author': u'alice',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 2,
-                              'codebase': u'',
-                              'comments': u'2nd commit',
-                              'files': [],
-                              'parent_changeids': [],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'1',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 2,
-                              'when_timestamp': epoch2datetime(SOMETIME + 2)},
-                             {'author': u'bob',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 3,
-                              'codebase': u'',
-                              'comments': u'3rd commit',
-                              'files': [],
-                              'parent_changeids': [],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'1',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 3,
-                              'when_timestamp': epoch2datetime(SOMETIME + 3)},
-                             {'author': u'franck',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 1,
-                              'codebase': u'',
-                              'comments': u'1st commit',
-                              'files': [],
-                              'parent_changeids': [],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'1',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 1,
-                              'when_timestamp': epoch2datetime(SOMETIME + 1)}]
-        expected_2ndBuild = [{'author': u'delanne',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 4,
-                              'codebase': u'',
-                              'comments': u'4th commit',
-                              'files': [],
-                              'parent_changeids': [1],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'2',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 4,
-                              'when_timestamp': epoch2datetime(SOMETIME + 4)}]
-        expected_3rdBuild = [{'author': u'bob',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 5,
-                              'codebase': u'',
-                              'comments': u'6th commit',
-                              'files': [],
-                              'parent_changeids': [2],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'2',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 5,
-                              'when_timestamp': epoch2datetime(SOMETIME + 5)}]
-        expected_4thBuild = []
-        expected_5thBuild = [{'author': u'alice',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 7,
-                              'codebase': u'',
-                              'comments': u'8th commit',
-                              'files': [],
-                              'parent_changeids': [6],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'4',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 7,
-                              'when_timestamp': epoch2datetime(SOMETIME + 7)},
-                             {'author': u'bob',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 8,
-                              'codebase': u'',
-                              'comments': u'9th commit',
-                              'files': [],
-                              'parent_changeids': [5],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'3',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 8,
-                              'when_timestamp': epoch2datetime(SOMETIME + 8)},
-                             {'author': u'franck',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 6,
-                              'codebase': u'',
-                              'comments': u'7th commit',
-                              'files': [],
-                              'parent_changeids': [4],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'3',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 6,
-                              'when_timestamp': epoch2datetime(SOMETIME + 6)}]
-        expected_6thBuild = [{'author': u'bob',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 9,
-                              'codebase': u'',
-                              'comments': u'10th commit',
-                              'files': [],
-                              'parent_changeids': [3],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'2',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 9,
-                              'when_timestamp': epoch2datetime(SOMETIME + 9)}]
-        expected_7thBuild = [{'author': u'bob',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 9,
-                              'codebase': u'',
-                              'comments': u'10th commit',
-                              'files': [],
-                              'parent_changeids': [3],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'2',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 9,
-                              'when_timestamp': epoch2datetime(SOMETIME + 9)},
-                             {'author': u'bob',
-                              'branch': u'master',
-                              'category': u'cat',
-                              'changeid': 10,
-                              'codebase': u'',
-                              'comments': u'11th commit',
-                              'files': [],
-                              'parent_changeids': [9],
-                              'project': u'proj',
-                              'properties': {},
-                              'repository': u'repo',
-                              'revision': u'3',
-                              'revlink': u'http://vc/abcd',
-                              'sourcestampid': 10,
-                              'when_timestamp': epoch2datetime(SOMETIME + 10)}]
+        @defer.inlineCallbacks
+        def expect(buildid, commits):
+            got = yield self.db.changes.getChangesForBuild(buildid)
+            got_commits = [c['comments'] for c in got]
+            self.assertEqual(sorted(got_commits), sorted(commits))
 
-        # 1st build
-        self.assertEqual(sorted((yield self.db.changes.getChangesForBuild(1))),
-                         sorted(expected_1stBuild))
-        # 2nd build
-        self.assertEqual(sorted((yield self.db.changes.getChangesForBuild(2))),
-                         sorted(expected_2ndBuild))
-        # 3rd build
-        self.assertEqual(sorted((yield self.db.changes.getChangesForBuild(3))),
-                         sorted(expected_3rdBuild))
-        # 4th build
-        self.assertEqual(sorted((yield self.db.changes.getChangesForBuild(4))),
-                         sorted(expected_4thBuild))
-        # 5th build
-        self.assertEqual(sorted((yield self.db.changes.getChangesForBuild(5))),
-                         sorted(expected_5thBuild))
-        # 6th build
-        self.assertEqual(sorted((yield self.db.changes.getChangesForBuild(6))),
-                         sorted(expected_6thBuild))
-        # 7th build
-        self.assertEqual(sorted((yield self.db.changes.getChangesForBuild(7))),
-                         sorted(expected_7thBuild))
+        yield expect(1, ['2nd commit', '3rd commit', '1st commit'])
+        yield expect(2, ['4th commit'])
+        yield expect(3, ['6th commit'])
+        yield expect(4, [])
+        yield expect(5, ['8th commit', '9th commit', '7th commit'])
+        yield expect(6, ['10th commit'])
+        yield expect(7, ['11th commit'])
 
 
-class TestFakeDB(unittest.TestCase, Tests):
+class TestFakeDB(TestReactorMixin, unittest.TestCase, Tests):
 
     def setUp(self):
-        self.master = fakemaster.make_master()
-        self.db = fakedb.FakeDBConnector(self.master, self)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantDb=True)
+        self.db = self.master.db
         self.db.checkForeignKeys = True
         self.insertTestData = self.db.insertTestData
 
@@ -1009,24 +763,22 @@ class TestRealDB(unittest.TestCase,
                  connector_component.ConnectorComponentMixin,
                  RealTests):
 
+    @defer.inlineCallbacks
     def setUp(self):
-        d = self.setUpConnectorComponent(
+        yield self.setUpConnectorComponent(
             table_names=['changes', 'change_files',
                          'change_properties', 'scheduler_changes', 'schedulers',
                          'sourcestampsets', 'sourcestamps', 'patches', 'change_users',
-                         'users', 'buildsets', 'buildslaves', 'builders', 'masters',
-                         'buildrequests', 'builds', 'buildset_sourcestamps'])
+                         'users', 'buildsets', 'workers', 'builders', 'masters',
+                         'buildrequests', 'builds', 'buildset_sourcestamps',
+                         'workers'])
 
-        @d.addCallback
-        def finish_setup(_):
-            self.db.changes = changes.ChangesConnectorComponent(self.db)
-            self.db.builds = builds.BuildsConnectorComponent(self.db)
-            self.db.sourcestamps = \
-                sourcestamps.SourceStampsConnectorComponent(self.db)
-            self.master = self.db.master
-            self.master.db = self.db
-
-        return d
+        self.db.changes = changes.ChangesConnectorComponent(self.db)
+        self.db.builds = builds.BuildsConnectorComponent(self.db)
+        self.db.sourcestamps = \
+            sourcestamps.SourceStampsConnectorComponent(self.db)
+        self.master = self.db.master
+        self.master.db = self.db
 
     def tearDown(self):
         return self.tearDownConnectorComponent()

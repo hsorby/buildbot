@@ -21,7 +21,7 @@ from twisted.internet import reactor
 from twisted.spread import pb
 
 
-class UsersClient(object):
+class UsersClient:
 
     """
     Client set up in buildbot.scripts.runner to send `buildbot user` args
@@ -40,14 +40,14 @@ class UsersClient(object):
         d = f.login(credentials.UsernamePassword(self.username, self.password))
         reactor.connectTCP(self.host, self.port, f)
 
+        @d.addCallback
         def call_commandline(remote):
             d = remote.callRemote("commandline", op, bb_username,
                                   bb_password, ids, info)
 
+            @d.addCallback
             def returnAndLose(res):
                 remote.broker.transport.loseConnection()
                 return res
-            d.addCallback(returnAndLose)
             return d
-        d.addCallback(call_commandline)
         return d

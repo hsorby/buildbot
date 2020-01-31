@@ -1,24 +1,16 @@
 .container
-  .row(ng-repeat="build in builds")
-    .col-sm-4
-      ul.breadcrumb
-        li
-          a(href="#/builders")
-            | Builders
-        li
-          a(href="#/builders/{{build.builderid}}")
-            | {{buildrequest.buildername}}
-        li
-          a(href="#/builders/{{build.builderid}}/build/{{build.number}}")
-            | {{build.number}}
   .row
-    .col-sm-8
-      tabset(justified="true")
-          tab(heading="build {{build.number}}", ng-repeat="build in builds")
-              rawdata(data="build")
-          tab(heading="buildrequest")
-              rawdata(data="buildrequest")
-          tab(heading="properties")
-              rawdata(data="buildset.properties")
-          tab(heading="buildset")
+      uib-tabset(justified="left")
+          uib-tab(heading="build {{build.number}}", active="build.active", ng-repeat="build in builds")
+              buildsummary(build="build")
+          uib-tab(heading="properties")
+              properties(properties="properties")
+          uib-tab(heading="Debug")
+              h4 Buildrequest
+              rawdata(data="raw_buildrequest")
+              h4 Buildset
               rawdata(data="buildset")
+              h4 Builder
+              rawdata(data="builder")
+              h4 Builds
+              rawdata(data="builds")

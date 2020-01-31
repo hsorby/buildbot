@@ -18,6 +18,7 @@
 library to populate parameters from and rpmspec file into a memory structure
 """
 
+
 import re
 
 from buildbot.steps.shell import ShellCommand
@@ -43,6 +44,8 @@ class RpmSpec(ShellCommand):
         @type kwargs: dict
         @param kwargs: All further keyword arguments.
         """
+        super().__init__(**kwargs)
+
         self.specfile = specfile
         self._pkg_name = None
         self._pkg_version = None

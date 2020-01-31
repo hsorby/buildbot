@@ -14,13 +14,13 @@
 # Copyright Buildbot Team Members
 
 from docutils import nodes
+from docutils.parsers.rst import Directive
 from sphinx import addnodes
 from sphinx.domains import Domain
 from sphinx.domains import Index
 from sphinx.domains import ObjType
 from sphinx.roles import XRefRole
 from sphinx.util import ws_re
-from sphinx.util.compat import Directive
 from sphinx.util.docfields import DocFieldTransformer
 from sphinx.util.docfields import Field
 from sphinx.util.docfields import TypedField
@@ -45,7 +45,7 @@ class BBRefTargetDirective(Directive):
     domain = 'bb'
 
     def run(self):
-        env = self.state.document.settings.env
+        self.env = env = self.state.document.settings.env
         # normalize whitespace in fullname like XRefRole does
         fullname = ws_re.sub(' ', self.arguments[0].strip())
         targetname = '%s-%s' % (self.ref_type, fullname)
@@ -71,7 +71,8 @@ class BBRefTargetDirective(Directive):
             else:
                 indextype = 'single'
                 indexentry = tpl % (fullname,)
-            entries.append((indextype, indexentry, targetname, targetname))
+            entries.append(
+                (indextype, indexentry, targetname, targetname, None))
 
         if entries:
             inode = addnodes.index(entries=entries)
@@ -141,7 +142,7 @@ class BBIndex(Index):
     def generate(self, docnames=None):
         content = {}
         idx_targets = self.domain.data['targets'].get(self.name, {})
-        for name, (docname, targetname) in idx_targets.iteritems():
+        for name, (docname, targetname) in idx_targets.items():
             letter = name[0].upper()
             content.setdefault(letter, []).append(
                 (name, 0, docname, targetname, '', '', ''))
@@ -184,7 +185,9 @@ class BBDomain(Domain):
         'sched': ObjType('sched', 'sched'),
         'chsrc': ObjType('chsrc', 'chsrc'),
         'step': ObjType('step', 'step'),
-        'status': ObjType('status', 'status'),
+        'reporter': ObjType('reporter', 'reporter'),
+        'configurator': ObjType('configurator', 'configurator'),
+        'worker': ObjType('worker', 'worker'),
         'cmdline': ObjType('cmdline', 'cmdline'),
         'msg': ObjType('msg', 'msg'),
         'event': ObjType('event', 'event'),
@@ -213,10 +216,20 @@ class BBDomain(Domain):
                                               'single: Build Steps; %s',
                                               'single: %s Build Step',
                                           ]),
-        'status': make_ref_target_directive('status',
+        'reporter': make_ref_target_directive('reporter',
+                                              indextemplates=[
+                                                  'single: Reporter Targets; %s',
+                                                  'single: %s Reporter Target',
+                                              ]),
+        'configurator': make_ref_target_directive('configurator',
+                                              indextemplates=[
+                                                  'single: Configurators; %s',
+                                                  'single: %s Configurators',
+                                              ]),
+        'worker': make_ref_target_directive('worker',
                                             indextemplates=[
-                                                'single: Status Targets; %s',
-                                                'single: %s Status Target',
+                                                'single: Build Workers; %s',
+                                                'single: %s Build Worker',
                                             ]),
         'cmdline': make_ref_target_directive('cmdline',
                                              indextemplates=[
@@ -232,7 +245,8 @@ class BBDomain(Domain):
                                          doc_field_types=[
                                              TypedField('key', label='Keys', names=('key',),
                                                         typenames=('type',), can_collapse=True),
-                                             Field('var', label='Variable', names=('var',)),
+                                             Field('var', label='Variable',
+                                                   names=('var',)),
                                          ]),
         'event': make_ref_target_directive('event',
                                            indextemplates=[
@@ -262,11 +276,18 @@ class BBDomain(Domain):
                                                TypedField('pathkey', label='Path Keys',
                                                           names=('pathkey',), typenames=('type',),
                                                           can_collapse=True),
-                                               Field('event', label='Event',
-                                                     names=('event',)),
-                                               Field('opt', label='Option',
-                                                     names=('opt',)),
                                            ]),
+        'raction': make_ref_target_directive('raction',
+                                             indextemplates=[
+                                                 'single: Resource Action; %s',
+                                             ],
+                                             name_annotation='POST with method:',
+                                             has_content=True,
+                                             doc_field_types=[
+                                                 TypedField('body', label='Body keys',
+                                                            names=('body',), typenames=('type',),
+                                                            can_collapse=True),
+                                             ]),
     }
 
     roles = {
@@ -274,7 +295,9 @@ class BBDomain(Domain):
         'sched': XRefRole(),
         'chsrc': XRefRole(),
         'step': XRefRole(),
-        'status': XRefRole(),
+        'reporter': XRefRole(),
+        'configurator': XRefRole(),
+        'worker': XRefRole(),
         'cmdline': XRefRole(),
         'msg': XRefRole(),
         'event': XRefRole(),
@@ -292,12 +315,15 @@ class BBDomain(Domain):
         make_index("sched", "Scheduler Index"),
         make_index("chsrc", "Change Source Index"),
         make_index("step", "Build Step Index"),
-        make_index("status", "Status Target Index"),
+        make_index("reporter", "Reporter Target Index"),
+        make_index("configurator", "Configurator Target Index"),
+        make_index("worker", "Build Worker Index"),
         make_index("cmdline", "Command Line Index"),
         make_index("msg", "MQ Routing Key Index"),
         make_index("event", "Data API Event Index"),
-        make_index("rtype", "Data API Resource Type Index"),
-        make_index("rpath", "Data API Path Index"),
+        make_index("rtype", "REST/Data API Resource Type Index"),
+        make_index("rpath", "REST/Data API Path Index"),
+        make_index("raction", "REST/Data API Actions Index"),
     ]
 
     def resolve_xref(self, env, fromdocname, builder, typ, target, node,

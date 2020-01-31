@@ -13,22 +13,25 @@
 #
 # Copyright Buildbot Team Members
 
+
 from twisted.internet.interfaces import IAddress
 from twisted.internet.interfaces import ITransport
 from twisted.protocols import basic
-from zope.interface import implements
+from zope.interface import implementer
+
+from buildbot.util import unicode2bytes
 
 
-class NullAddress(object):
+@implementer(IAddress)
+class NullAddress:
 
     "an address for NullTransport"
-    implements(IAddress)
 
 
-class NullTransport(object):
+@implementer(ITransport)
+class NullTransport:
 
     "a do-nothing transport to make NetstringReceiver happy"
-    implements(ITransport)
 
     def write(self, data):
         raise NotImplementedError
@@ -63,6 +66,7 @@ class NetstringParser(basic.NetstringReceiver):
         self.strings = []
 
     def feed(self, data):
+        data = unicode2bytes(data)
         self.dataReceived(data)
         # dataReceived handles errors unusually quietly!
         if self.brokenPeer:

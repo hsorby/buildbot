@@ -13,12 +13,16 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.test.util import validation
-from buildbot.util import tuplematch
+
 from twisted.internet import defer
 
+from buildbot.mq import base
+from buildbot.test.util import validation
+from buildbot.util import service
+from buildbot.util import tuplematch
 
-class FakeMQConnector(object):
+
+class FakeMQConnector(service.AsyncMultiService, base.MQBase):
 
     # a fake connector that doesn't actually bridge messages from production to
     # consumption, and thus doesn't do any topic handling or persistence
@@ -27,8 +31,8 @@ class FakeMQConnector(object):
     # is set to false:
     verifyMessages = True
 
-    def __init__(self, master, testcase):
-        self.master = master
+    def __init__(self, testcase):
+        super().__init__()
         self.testcase = testcase
         self.setup_called = False
         self.productions = []
@@ -46,8 +50,9 @@ class FakeMQConnector(object):
 # routing key
 #        if self.verifyMessages:
 #            validation.verifyMessage(self.testcase, routingKey, data)
-        if [k for k in routingKey if not isinstance(k, str)]:
-            raise AssertionError("%s is not all strings" % (routingKey,))
+
+        if any(not isinstance(k, str) for k in routingKey):
+            raise AssertionError("%s is not all str" % (routingKey,))
         self.productions.append((routingKey, data))
         # note - no consumers are called: IT'S A FAKE
 
@@ -63,7 +68,8 @@ class FakeMQConnector(object):
             raise AssertionError("no consumer found")
 
     def startConsuming(self, callback, filter, persistent_name=None):
-        if [k for k in filter if not isinstance(k, str) and k is not None]:
+        if any(not isinstance(k, str) and
+               k is not None for k in filter):
             raise AssertionError("%s is not a filter" % (filter,))
         qref = FakeQueueRef()
         qref.qrefs = self.qrefs
@@ -92,7 +98,7 @@ class FakeMQConnector(object):
         self.productions = []
 
 
-class FakeQueueRef(object):
+class FakeQueueRef:
 
     def stopConsuming(self):
         if self in self.qrefs:

@@ -32,7 +32,7 @@ Schema
 ------
 
 The database schema is maintained with `SQLAlchemy-Migrate
-<http://code.google.com/p/sqlalchemy-migrate/>`_.  This package handles the
+<https://github.com/openstack/sqlalchemy-migrate>`_.  This package handles the
 details of upgrading users between different schema versions.
 
 The schema itself is considered an implementation detail, and may change
@@ -50,7 +50,7 @@ Identifier
 
 .. _type-identifier:
 
-An "identifier" is a nonempty unicode string of limited length, containing only ASCII alphanumeric characters along with ``-`` (dash) and ``_`` (underscore), and not beginning with a digit
+An "identifier" is a nonempty unicode string of limited length, containing only UTF-8 alphanumeric characters along with ``-`` (dash) and ``_`` (underscore), and not beginning with a digit
 Wherever an identifier is used, the documentation will give the maximum length in characters.
 The function :py:func:`buildbot.util.identifiers.isIdentifier` is useful to verify a well-formed identifier.
 
@@ -108,7 +108,7 @@ buildrequests
         returns ``None`` if there is no such buildrequest.  Note that build
         requests are not cached, as the values in the database are not fixed.
 
-    .. py:method:: getBuildRequests(buildername=None, complete=None, claimed=None, bsid=None, branch=None, repository=None)
+    .. py:method:: getBuildRequests(buildername=None, complete=None, claimed=None, bsid=None, branch=None, repository=None, resultSpec=None)
 
         :param buildername: limit results to buildrequests for this builder
         :type buildername: string
@@ -119,6 +119,8 @@ buildrequests
         :param bsid: see below
         :param repository: the repository associated with the sourcestamps originating the requests
         :param branch: the branch associated with the sourcestamps originating the requests
+        :param resultSpec: resultSpec containing filters sorting and paging request from data/REST API.
+            If possible, the db layer can optimize the SQL query using this information.
         :returns: list of brdicts, via Deferred
 
         Get a list of build requests matching the given characteristics.
@@ -152,10 +154,6 @@ buildrequests
 
         If ``claimed_at`` is not given, then the current time will be used.
 
-        As of 0.8.5, this method can no longer be used to re-claim build
-        requests.  All given ID's must be unclaimed.  Use
-        :py:meth:`reclaimBuildRequests` to reclaim.
-
         .. index:: single: MySQL; limitations
         .. index:: single: SQLite; limitations
 
@@ -166,20 +164,6 @@ buildrequests
             transactions (MySQL), this method will not properly roll back any
             partial claims made before an :py:exc:`AlreadyClaimedError` is
             generated.
-
-    .. py:method:: reclaimBuildRequests(brids)
-
-        :param brids: ids of buildrequests to reclaim
-        :type brids: list
-        :returns: Deferred
-        :raises: :py:exc:`AlreadyClaimedError`
-
-        Re-claim the given build requests, updating the timestamp, but checking
-        that the requests are owned by this master.  The resulting deferred will
-        fire normally on success, or fail with :py:exc:`AlreadyClaimedError` if
-        *any* of the build requests are already claimed by another master
-        instance, or don't exist.  In this case, none of the reclaims will take
-        effect.
 
     .. py:method:: unclaimBuildRequests(brids)
 
@@ -207,19 +191,6 @@ buildrequests
         request is already completed or does not exist.  If ``complete_at`` is
         not given, the current time will be used.
 
-    .. py:method:: unclaimExpiredRequests(old)
-
-        :param old: number of seconds after which a claim is considered old
-        :type old: int
-        :returns: Deferred
-
-        Find any incomplete claimed builds which are older than ``old``
-        seconds, and clear their claim information.
-
-        This is intended to catch builds that were claimed by a master which
-        has since disappeared.  As a side effect, it will log a message if any
-        requests are unclaimed.
-
 builds
 ~~~~~~
 
@@ -231,7 +202,7 @@ builds
 
     This class handles builds.
     One build record is created for each build performed by a master.
-    This record contains information on the status of the build, as well as links to the resources used in the build: builder, master, slave, etc.
+    This record contains information on the status of the build, as well as links to the resources used in the build: builder, master, worker, etc.
 
     An instance of this class is available at ``master.db.builds``.
 
@@ -243,7 +214,7 @@ builds
     * ``number`` (the build number, unique only within the builder)
     * ``builderid`` (the ID of the builder that performed this build)
     * ``buildrequestid`` (the ID of the build request that caused this build)
-    * ``buildslaveid`` (the ID of the slave on which this build was performed)
+    * ``workerid`` (the ID of the worker on which this build was performed)
     * ``masterid`` (the ID of the master on which this build was performed)
     * ``started_at`` (datetime at which this build began)
     * ``complete_at`` (datetime at which this build finished, or None if it is ongoing)
@@ -272,25 +243,27 @@ builds
         :param integer builderid: builder to get builds for
         :param integer number: the current build number. Previous build will be taken from this number
         :param list ssBuild: the list of sourcestamps for the current build number
-        :returns: None or a build dictionnary
+        :returns: None or a build dictionary
 
         Returns the last successful build from the current build number with the same repository/repository/codebase
 
-    .. py:method:: getBuilds(builderid=None, buildrequestid=None, complete=None)
+    .. py:method:: getBuilds(builderid=None, buildrequestid=None, complete=None, resultSpec=None)
 
         :param integer builderid: builder to get builds for
         :param integer buildrequestid: buildrequest to get builds for
         :param boolean complete: if not None, filters results based on completeness
+        :param resultSpec: resultSpec containing filters sorting and paging request from data/REST API.
+            If possible, the db layer can optimize the SQL query using this information.
         :returns: list of build dictionaries as above, via Deferred
 
         Get a list of builds, in the format described above.
         Each of the parameters limit the resulting set of builds.
 
-    .. py:method:: addBuild(builderid, buildrequestid, buildslaveid, masterid, state_string)
+    .. py:method:: addBuild(builderid, buildrequestid, workerid, masterid, state_string)
 
         :param integer builderid: builder to get builds for
         :param integer buildrequestid: build request id
-        :param integer slaveid: slave performing the build
+        :param integer workerid: worker performing the build
         :param integer masterid: master performing the build
         :param unicode state_string: initial state of the build
         :returns: tuple of build ID and build number, via Deferred
@@ -546,6 +519,16 @@ logs
         It should only be called for finished logs.
         This method may take some time to complete.
 
+    .. py:method:: deleteOldLogChunks(older_than_timestamp)
+
+        :param integer older_than_timestamp: the logs whose step's ``started_at`` is older than ``older_than_timestamp`` will be deleted.
+        :returns: Deferred
+
+        Delete old logchunks (helper for the ``logHorizon`` policy).
+        Old logs have their logchunks deleted from the database, but they keep their ``num_lines`` metadata.
+        They have their types changed to 'd', so that the UI can display something meaningful.
+
+
 buildsets
 ~~~~~~~~~
 
@@ -624,11 +607,14 @@ buildsets
         Note that buildsets are not cached, as the values in the database are
         not fixed.
 
-    .. py:method:: getBuildsets(complete=None)
+    .. py:method:: getBuildsets(complete=None, resultSpec=None)
 
         :param complete: if true, return only complete buildsets; if false,
             return only incomplete buildsets; if ``None`` or omitted, return all
             buildsets
+        :param resultSpec: resultSpec containing filters sorting and paging request from data/REST API.
+            If possible, the db layer can optimize the SQL query using this information.
+
         :returns: list of bsdicts, via Deferred
 
         Get a list of bsdicts matching the given criteria.
@@ -664,78 +650,108 @@ buildsets
         Note that this method does not distinguish a nonexistent buildset from
         a buildset with no properties, and returns ``{}`` in either case.
 
-buildslaves
-~~~~~~~~~~~
+workers
+~~~~~~~
 
-.. py:module:: buildbot.db.buildslaves
+.. py:module:: buildbot.db.workers
 
-.. index:: double: BuildSlaves; DB Connector Component
+.. index:: double: Workers; DB Connector Component
 
-.. py:class:: BuildslavesConnectorComponent
+.. py:class:: WorkersConnectorComponent
 
-    This class handles Buildbot's notion of buildslaves.
-    The buildslave information is returned as a dictionary:
+    This class handles Buildbot's notion of workers.
+    The worker information is returned as a dictionary:
 
     * ``id``
-    * ``name`` - the name of the buildslave
-    * ``slaveinfo`` - buildslave information as dictionary
-    * ``connected_to`` - a list of masters, by ID, to which this buildslave is currently connected.
-      This list will typically contain only one master, but in unusual circumstances the same bulidslave may appear to be connected to multiple masters simultaneously.
-    * ``configured_on`` - a list of master-builder pairs, on which this buildslave is configured.
+    * ``name`` - the name of the worker
+    * ``workerinfo`` - worker information as dictionary
+    * ``paused`` - boolean indicating worker is paused and shall not take new builds
+    * ``graceful`` - boolean indicating worker will be shutdown as soon as build finished
+    * ``connected_to`` - a list of masters, by ID, to which this worker is currently connected.
+      This list will typically contain only one master, but in unusual circumstances the same worker may appear to be connected to multiple masters simultaneously.
+    * ``configured_on`` - a list of master-builder pairs, on which this worker is configured.
       Each pair is represented by a dictionary with keys ``buliderid`` and ``masterid``.
 
-    The buildslave information can be any JSON-able object.
-    See :bb:rtype:`buildslave` for more detail.
+    The worker information can be any JSON-able object.
+    See :bb:rtype:`worker` for more detail.
 
-    .. py:method:: findBuildslaveId(name=name)
+    .. py:method:: findWorkerId(name=name)
 
-        :param name: buildslave name
+        :param name: worker name
         :type name: 50-character identifier
-        :returns: builslave ID via Deferred
+        :returns: worker ID via Deferred
 
-        Get the ID for a buildslave, adding a new buildslave to the database if necessary.
-        The slave information for a new buildslave is initialized to an empty dictionary.
+        Get the ID for a worker, adding a new worker to the database if necessary.
+        The worker information for a new worker is initialized to an empty dictionary.
 
-    .. py:method:: getBuildslaves(masterid=None, builderid=None)
+    .. py:method:: getWorkers(masterid=None, builderid=None)
 
-        :param integer masterid: limit to slaves configured on this master
-        :param integer builderid: limit to slaves configured on this builder
-        :returns: list of buildslave dictionaries, via Deferred
+        :param integer masterid: limit to workers configured on this master
+        :param integer builderid: limit to workers configured on this builder
+        :returns: list of worker dictionaries, via Deferred
 
-        Get a list of buildslaves.
-        If either or both of the filtering parameters either specified, then the result is limited to buildslaves configured to run on that master or builder.
+        Get a list of workers.
+        If either or both of the filtering parameters either specified, then the result is limited to workers configured to run on that master or builder.
         The ``configured_on`` results are limited by the filtering parameters as well.
         The ``connected_to`` results are limited by the ``masterid`` parameter.
 
-    .. py:method:: getBuildslave(slaveid=None, name=None, masterid=None, builderid=None)
+    .. py:method:: getWorker(workerid=None, name=None, masterid=None, builderid=None)
 
-        :param string name: the name of the buildslave to retrieve
-        :param integer buildslaveid: the ID of the buildslave to retrieve
-        :param integer masterid: limit to slaves configured on this master
-        :param integer builderid: limit to slaves configured on this builder
+        :param string name: the name of the worker to retrieve
+        :param integer workerid: the ID of the worker to retrieve
+        :param integer masterid: limit to workers configured on this master
+        :param integer builderid: limit to workers configured on this builder
         :returns: info dictionary or None, via Deferred
 
-        Looks up the buildslave with the given name or ID, returning ``None`` if no matching buildslave is found.
-        The ``masterid`` and ``builderid`` arguments function as they do for :py:meth:`getBuildslaves`.
+        Looks up the worker with the given name or ID, returning ``None`` if no matching worker is found.
+        The ``masterid`` and ``builderid`` arguments function as they do for :py:meth:`getWorkers`.
 
-    .. py:method:: buildslaveConnected(buildslaveid, masterid, slaveinfo)
+    .. py:method:: workerConnected(workerid, masterid, workerinfo)
 
-        :param integer buildslaveid: the ID of the buildslave
+        :param integer workerid: the ID of the worker
         :param integer masterid: the ID of the master to which it connected
-        :param slaveinfo: the new buildslave information dictionary
-        :type slaveinfo: dict
+        :param workerinfo: the new worker information dictionary
+        :type workerinfo: dict
         :returns: Deferred
 
-        Record the given buildslave as attached to the given master, and update its cached slave information.
+        Record the given worker as attached to the given master, and update its cached worker information.
         The supplied information completely replaces any existing information.
 
-    .. py:method:: buildslaveDisconnected(buildslaveid, masterid)
+    .. py:method:: workerDisconnected(workerid, masterid)
 
-        :param integer buildslaveid: the ID of the buildslave
+        :param integer workerid: the ID of the worker
         :param integer masterid: the ID of the master to which it connected
         :returns: Deferred
 
-        Record the given buildslave as no longer attached to the given master.
+        Record the given worker as no longer attached to the given master.
+
+    .. py:method:: workerConfigured(workerid, masterid, builderids)
+
+        :param integer workerid: the ID of the worker
+        :param integer masterid: the ID of the master to which it configured
+        :param list of integer builderids: the ID of the builders to which it is configured
+        :returns: Deferred
+
+        Record the given worker as being configured on the given master and for given builders.
+        This method will also remove any other builder that were configured previously for same (worker, master) combination.
+
+
+    .. py:method:: deconfigureAllWorkersForMaster(masterid)
+
+        :param integer masterid: the ID of the master to which it configured
+        :returns: Deferred
+
+        Unregister all the workers configured to a master for given builders.
+        This shall happen when master disabled or before reconfiguration
+
+    .. py:method:: setWorkerState(workerid, paused, graceful)
+
+        :param integer workerid: the ID of the worker whose state is being changed
+        :param integer paused: the paused state
+        :param integer graceful: the graceful state
+        :returns: Deferred
+
+        Change the state of a worker (see definition of states above in worker dict description)
 
 changes
 ~~~~~~~
@@ -759,6 +775,7 @@ changes
     * ``changeid`` (the ID of this change)
     * ``parent_changeids`` (list of ID; change's parents)
     * ``author`` (unicode; the author of the change)
+    * ``committer`` (unicode; the committer of the change)
     * ``files`` (list of unicode; source-code filenames changed)
     * ``comments`` (unicode; user comments)
     * ``is_dir`` (deprecated)
@@ -791,10 +808,12 @@ changes
 
         return the last changeID which matches the repository/project/codebase
 
-    .. py:method:: addChange(author=None, files=None, comments=None, is_dir=0, links=None, revision=None, when_timestamp=None, branch=None, category=None, revlink='', properties={}, repository='', project='', uid=None)
+    .. py:method:: addChange(author=None, committer=None, files=None, comments=None, is_dir=0, links=None, revision=None, when_timestamp=None, branch=None, category=None, revlink='', properties={}, repository='', project='', uid=None)
 
         :param author: the author of this change
         :type author: unicode string
+        :param committer: the committer of this change
+        :type committer: unicode string
         :param files: a list of filenames that were changed
         :type branch: list of unicode strings
         :param comments: user comments on the change
@@ -896,12 +915,19 @@ changes
 
         Get the "blame" list of changes for a build.
 
+    .. py:method:: getBuildsForChange(changeid)
+
+        :param changeid: ID of the change
+        :returns: list of buildDict via Deferred
+
+        Get builds related to a change
+
     .. py:method:: getChangeFromSSid(sourcestampid)
 
         :param sourcestampid: ID of the sourcestampid
         :returns: chdict via Deferred
 
-        returns the change dictionnary related to the sourcestamp ID.
+        returns the change dictionary related to the sourcestamp ID.
 
 changesources
 ~~~~~~~~~~~~~
@@ -920,7 +946,7 @@ changesources
 
     An instance of this class is available at ``master.db.changesources``.
 
-    Changesources are identified by their changesourceid, which can be objtained from :py:meth:`findChangeSourceId`.
+    Changesources are identified by their changesourceid, which can be obtained from :py:meth:`findChangeSourceId`.
 
     Changesources are represented by dictionaries with the following keys:
 
@@ -989,7 +1015,7 @@ schedulers
 
     An instance of this class is available at ``master.db.schedulers``.
 
-    Schedulers are identified by their schedulerid, which can be objtained from :py:meth:`findSchedulerId`.
+    Schedulers are identified by their schedulerid, which can be obtained from :py:meth:`findSchedulerId`.
 
     Schedulers are represented by dictionaries with the following keys:
 
@@ -1236,11 +1262,26 @@ state
         :param name: the name of the value to change
         :param value: the value to set
         :type value: JSON-able value
-        :param returns: Deferred
+        :param returns: value actually written via Deferred
         :raises: TypeError if JSONification fails
 
         Set the state value for ``name`` for the object with id ``objectid``,
         overwriting any existing value.
+        In case of two racing writes, the first (as per db rule) one wins, the seconds returns the value from the first.
+
+    .. py:method:: atomicCreateState(objectid, name, thd_create_callback)
+
+        :param objectid: the objectid for which the state should be created
+        :param name: the name of the value to create
+        :param thd_create_callback: the function to call from thread to create the value if non-existent. (returns JSON-able value)
+        :param returns: Deferred
+        :raises: TypeError if JSONification fails
+
+        Atomically creates the state value for ``name`` for the object with id ``objectid``,
+        If there is an existing value, returns that instead.
+        This implementation ensures the state is created only once for the whole cluster.
+
+    Those 3 methods have their threaded equivalent, ``thdGetObjectId``, ``thdGetState``, ``thdSetState`` that are intended to run in synchronous code, (e.g master.cfg environment)
 
 users
 ~~~~~
@@ -1413,6 +1454,12 @@ masters
         Get a list of the masters, represented as dictionaries; masters are sorted
         and paged using generic data query options
 
+    .. py:method:: setAllMastersActiveLongTimeAgo()
+
+        :returns: None via Deferred
+
+        This method is intended to be call by upgrade-master, and will effectively force housekeeping on all masters at next startup.
+        This method is not intended to be called outside of housekeeping scripts.
 
 builders
 ~~~~~~~~
@@ -1428,17 +1475,20 @@ builders
     Builders are represented by master dictionaries with the following keys:
 
     * ``id`` -- the ID of this builder
-    * ``name`` -- the name of the builder
+    * ``name``  -- the builder name, a 20-character :ref:`identifier <type-identifier>`
     * ``masterids`` -- the IDs of the masters where this builder is configured (sorted by id)
 
-    .. py:method:: findBuilderId(name)
+    .. py:method:: findBuilderId(name, autoCreate=True)
 
-        :param unicode name: name of this builder
+        :param name: name of this builder
+        :type name: 20-character :ref:`identifier <type-identifier>`
+        :param autoCreate: automatically create the builder if name not found
+        :type autoCreate: bool
         :returns: builder id via Deferred
 
         Return the builder ID for the builder with this builder name.
         If such a builder is already in the database, this returns the ID.
-        If not, the builder is added to the database.
+        If not and ``autoCreate`` is True, the builder is added to the database.
 
     .. py:method:: addBuilderMaster(builderid=None, masterid=None)
 
@@ -1519,6 +1569,26 @@ The DB Connector and Components
         ``self.db.model``.  In the unusual case that a connector component
         needs access to the master, the easiest path is ``self.db.master``.
 
+    .. py:method:: checkLength(col, value)
+
+        For use by subclasses to check that 'value' will fit in 'col', where 'col' is a table column from the model.
+        Ignore this check for database engines that either provide this error themselves (postgres) or that do not enforce maximum-length restrictions (sqlite)
+
+    .. py:method:: findSomethingId(self, tbl, whereclause, insert_values, _race_hook=None, autoCreate=True)
+
+        Find (using ``whereclause``) or add (using ``insert_values``) a row to
+        ``table``, and return the resulting ID. If ``autoCreate`` == False, we will not automatically insert the row.
+
+    .. py:method:: hashColumns(*args)
+
+        Hash the given values in a consistent manner: None is represented as \xf5, an invalid unicode byte; strings are converted to utf8; and integers are represented by their decimal expansion.
+        The values are then joined by '\0' and hashed with sha1.
+
+    .. py:method:: doBatch(batch, batch_n=500)
+
+        returns an Iterator that batches stuff in order to not push to many thing in a single request.
+        Especially sqlite has 999 limit on argument it can take in a requests.
+
 Direct Database Access
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1575,7 +1645,7 @@ object, ``conn``.
     overloading to implement pythonic SQL statements, and `is` operator is not overloadable,
     we need to keep the `==` operators. In order to solve this issue, buildbot
     uses `buildbot.db.NULL` constant, which is `None`.
-    So instead of writting `tbl.c.value == None`, please write `tbl.c.value == NULL`)
+    So instead of writing `tbl.c.value == None`, please write `tbl.c.value == NULL`)
 
 
 .. py:class:: DBThreadPool
@@ -1716,7 +1786,7 @@ Modifying the Database Schema
 -----------------------------
 
 Changes to the schema are accomplished through migration scripts, supported by
-`SQLAlchemy-Migrate <http://code.google.com/p/sqlalchemy-migrate/>`_.  In fact,
+`SQLAlchemy-Migrate <https://github.com/openstack/sqlalchemy-migrate>`_.  In fact,
 even new databases are created with the migration scripts -- a new database is
 a migrated version of an empty database.
 
@@ -1743,7 +1813,7 @@ Also, adjust the fake database table definitions in :src:`master/buildbot/test/f
 Your upgrade script should have unit tests.  The classes in :src:`master/buildbot/test/util/migration.py` make this straightforward.
 Unit test scripts should be named e.g., :file:`test_db_migrate_versions_015_remove_bad_master_objectid.py`.
 
-The :file:`master/buildbot/test/integration/test_upgrade.py` also tests
+The :src:`master/buildbot/test/integration/test_upgrade.py <master/buildbot/test/integration/test_upgrade.py>` also tests
 upgrades, and will confirm that the resulting database matches the model.  If
 you encounter implicit indexes on MySQL, that do not appear on SQLite or
 Postgres, add them to ``implied_indexes`` in
@@ -1751,16 +1821,24 @@ Postgres, add them to ``implied_indexes`` in
 
 Foreign key checking
 --------------------
-Non sqlite db backends are checking the foreign keys consistancy. As sqlite is much
-easier to install, most of the developer would only test against sqlite, and then get
-errors on metabuildbot. In order to avoid that the fakedb can check the foreign key
-consistancy of your test data. for this, just enable it with::
+PostgreSQL and SQlite db backends are checking the foreign keys consistency.
+:bug:`2248` needs to be fixed so that we can support foreign key checking for MySQL.
+
+To maintain consistency with real db, fakedb can check the foreign key consistency of your test data. For this, just enable it with::
 
     self.db = fakedb.FakeDBConnector(self.master, self)
     self.db.checkForeignKeys = True
 
-Note that tests that only use fakedb do not really need foreign key consistency, even
-if this is a good practice to enable it in new code.
+Note that tests that only use fakedb do not really need foreign key consistency, even if this is a good practice to enable it in new code.
+
+
+.. note:
+
+    Since version `3.6.19 <https://www.sqlite.org/releaselog/3_6_19.html>`_, sqlite can do `foreignkey checks <https://www.sqlite.org/pragma.html#pragma_foreign_key_check>`_, which help a lot for testing foreign keys constraint in a developer friendly environment.
+    For compat reason, they decided to disable foreign key checks by default.
+    Since 0.9.0b8, buildbot now enforces by default the foreign key checking, and is now dependent on sqlite3 >3.6.19, which was released in 2009.
+    One consequence of default disablement is that sqlalchemy-migrate backend for sqlite is not well prepared for foreign key checks, and we have to disable them in the migration scripts.
+
 
 Database Compatibility Notes
 ----------------------------
@@ -1784,15 +1862,15 @@ Index Length in MySQL
 
 .. index:: single: MySQL; limitations
 
-MySQL only supports about 330-character indexes.  The actual index length is
+MySQL only supports about 330-character indexes. The actual index length is
 1000 bytes, but MySQL uses 3-byte encoding for UTF8 strings.  This is a
 longstanding bug in MySQL - see `"Specified key was too long; max key
 length is 1000 bytes" with utf8 <http://bugs.mysql.com/bug.php?id=4541>`_.
 While this makes sense for indexes used for record lookup, it limits the
 ability to use unique indexes to prevent duplicate rows.
 
-InnoDB has even more severe restrictions on key lengths, which is why the MySQL
-implementation requires a MyISAM storage engine.
+InnoDB only supports indexes up to 255 unicode characters, which is why
+all indexed columns are limited to 255 characters in Buildbot.
 
 Transactions in MySQL
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1827,3 +1905,72 @@ id.
 
 If this weakness has a significant performance impact, it would be acceptable to
 conditionalize use of the subquery on the database dialect.
+
+Too Many Variables in SQLite
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. index:: single: SQLite; limitations
+
+Sqlite has a limitation on the number of variables it can use.
+This limitation is usually `SQLITE_LIMIT_VARIABLE_NUMBER=999 <http://www.sqlite.org/c3ref/c_limit_attached.html#sqlitelimitvariablenumber>`_.
+There is currently no way with pysqlite to query the value of this limit.
+The C-api ``sqlite_limit`` is just not bound to the python.
+
+When you hit this problem, you will get error like the following:
+
+.. code-block:: none
+
+    sqlalchemy.exc.OperationalError: (OperationalError) too many SQL variables
+    u'DELETE FROM scheduler_changes WHERE scheduler_changes.changeid IN (?, ?, ?, ......tons of ?? and IDs .... 9363, 9362, 9361)
+
+You can use the method :py:meth:`doBatch` in order to write batching code in a consistent manner.
+
+Testing migrations with real databases
+--------------------------------------
+
+By default Buildbot test suite uses SQLite database for testings database
+migrations.
+To use other database set ``BUILDBOT_TEST_DB_URL`` environment variable to
+value in `SQLAlchemy database URL specification
+<http://docs.sqlalchemy.org/en/latest/core/engines.html#database-urls>`_.
+
+For example, to run tests with file-based SQLite database you can start
+tests in the following way:
+
+.. code-block:: bash
+
+   BUILDBOT_TEST_DB_URL=sqlite:////tmp/test_db.sqlite trial buildbot.test
+
+Run databases in Docker
+~~~~~~~~~~~~~~~~~~~~~~~
+
+`Docker <https://www.docker.com/>`_ allows to easily install and configure
+different databases locally in containers.
+
+To run tests with PostgreSQL:
+
+.. code-block:: bash
+
+   # Install psycopg.
+   pip install psycopg2
+   # Start container with PostgreSQL 9.5.
+   # It will listen on port 15432 on localhost.
+   sudo docker run --name bb-test-postgres -e POSTGRES_PASSWORD=password \
+       -p 127.0.0.1:15432:5432 -d postgres:9.5
+   # Start interesting tests
+   BUILDBOT_TEST_DB_URL=postgresql://postgres:password@localhost:15432/postgres \
+       trial buildbot.test
+
+To run tests with MySQL:
+
+.. code-block:: bash
+
+   # Install mysqlclient
+   pip install mysqlclient
+   # Start container with MySQL 5.5.
+   # It will listen on port 13306 on localhost.
+   sudo docker run --name bb-test-mysql -e MYSQL_ROOT_PASSWORD=password \
+       -p 127.0.0.1:13306:3306 -d mysql:5.5
+   # Start interesting tests
+   BUILDBOT_TEST_DB_URL=mysql+mysqldb://root:password@127.0.0.1:13306/mysql \
+       trial buildbot.test

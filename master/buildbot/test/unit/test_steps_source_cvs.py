@@ -15,18 +15,19 @@
 
 import time
 
-from buildbot.status.results import FAILURE
-from buildbot.status.results import RETRY
-from buildbot.status.results import SUCCESS
-from buildbot.steps import shell
+from twisted.internet import error
+from twisted.trial import unittest
+
+from buildbot.process import remotetransfer
+from buildbot.process.results import FAILURE
+from buildbot.process.results import RETRY
+from buildbot.process.results import SUCCESS
 from buildbot.steps.source import cvs
-from buildbot.steps.transfer import _FileReader
 from buildbot.test.fake.remotecommand import Expect
 from buildbot.test.fake.remotecommand import ExpectRemoteRef
 from buildbot.test.fake.remotecommand import ExpectShell
 from buildbot.test.util import sourcesteps
-from twisted.internet import error
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
 def uploadString(cvsroot):
@@ -37,16 +38,18 @@ def uploadString(cvsroot):
     return behavior
 
 
-class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
+class TestCVS(sourcesteps.SourceStepMixin, TestReactorMixin,
+              unittest.TestCase):
 
     def setUp(self):
+        self.setUpTestReactor()
         return self.setUpSourceStep()
 
     def tearDown(self):
         return self.tearDownSourceStep()
 
     def setupStep(self, step, *args, **kwargs):
-        sourcesteps.SourceStepMixin.setupStep(self, step, *args, **kwargs)
+        super().setupStep(step, *args, **kwargs)
 
         # make parseGotRevision return something consistent, patching the class
         # instead of the object since a new object is constructed by runTest.
@@ -75,36 +78,100 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_cvsEntriesContainStickyDates(self):
         step = cvs.CVS(cvsroot="x", cvsmodule="m", mode='full', method='clean')
         self.assertEqual(step._cvsEntriesContainStickyDates('D'), False)
-        self.assertEqual(step._cvsEntriesContainStickyDates('/file/1.1/Fri May 17 23:20:00//TMOZILLA_1_0_0_BRANCH\nD'), False)
-        self.assertEqual(step._cvsEntriesContainStickyDates('/file/1.1/Fri May 17 23:20:00//D2013.10.08.11.20.33\nD'), True)
-        self.assertEqual(step._cvsEntriesContainStickyDates('/file1/1.1/Fri May 17 23:20:00//\n/file2/1.1.2.3/Fri May 17 23:20:00//D2013.10.08.11.20.33\nD'), True)
+        self.assertEqual(step._cvsEntriesContainStickyDates(
+            '/file/1.1/Fri May 17 23:20:00//TMOZILLA_1_0_0_BRANCH\nD'), False)
+        self.assertEqual(step._cvsEntriesContainStickyDates(
+            '/file/1.1/Fri May 17 23:20:00//D2013.10.08.11.20.33\nD'), True)
+        self.assertEqual(step._cvsEntriesContainStickyDates(
+            '/file1/1.1/Fri May 17 23:20:00//\n/file2/1.1.2.3/Fri May 17 23:20:00//D2013.10.08.11.20.33\nD'), True)
 
-    def test_mode_full_clean(self):
+    def test_mode_full_clean_and_login(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                     cvsmodule="mozilla/browser/", mode='full', method='clean',
-                    login=True))
+                    login="a password"))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['cvs',
+                                 '-d',
+                                 ':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot',
+                                 'login'],
+                        initialStdin="a password\n")
+            + 0,
+            Expect('stat', dict(file='wkdir/.buildbot-patched',
+                                logEnviron=True))
+            + 1,
+            Expect('uploadFile', dict(blocksize=32768, maxsize=None,
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+            + 0,
+            Expect('uploadFile', dict(blocksize=32768, maxsize=None,
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            + Expect.behavior(uploadString('mozilla/browser/'))
+            + 0,
+            Expect('uploadFile', dict(blocksize=32768, maxsize=None,
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['cvsdiscard'])
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['cvs', '-z3', 'update', '-dP'])
+            + 0,
+        )
+
+        self.expectOutcome(result=SUCCESS, state_string="update")
+        self.expectProperty('got_revision', '2012-09-09 12:00:39 +0000', 'CVS')
+        return self.runStep()
+
+    def test_mode_full_clean_and_login_worker_2_16(self):
+        self.setupStep(
+            cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
+                    cvsmodule="mozilla/browser/", mode='full', method='clean',
+                    login="a password"),
+            worker_version={'*': '2.16'})
+
+        self.expectCommands(
+            ExpectShell(workdir='wkdir',
+                        command=['cvs', '--version'])
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['cvs',
+                                 '-d',
+                                 ':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot',
+                                 'login'],
+                        initialStdin="a password\n")
             + 0,
             Expect('stat', dict(file='wkdir/.buildbot-patched',
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
                                       slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
                                       slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
                                       slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvsdiscard'])
@@ -121,8 +188,72 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_full_clean_patch(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='full', method='clean',
-                    login=True), patch=(1, 'patch'))
+                    cvsmodule="mozilla/browser/", mode='full', method='clean'),
+            patch=(1, 'patch'))
+        self.expectCommands(
+            ExpectShell(workdir='wkdir',
+                        command=['cvs', '--version'])
+            + 0,
+            Expect('stat', dict(file='wkdir/.buildbot-patched',
+                                logEnviron=True))
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['cvsdiscard'])
+            + 0,
+            Expect('uploadFile', dict(blocksize=32768, maxsize=None,
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+            + 0,
+            Expect('uploadFile', dict(blocksize=32768, maxsize=None,
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            + Expect.behavior(uploadString('mozilla/browser/'))
+            + 0,
+            Expect('uploadFile', dict(blocksize=32768, maxsize=None,
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['cvsdiscard'])
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['cvs', '-z3', 'update', '-dP'])
+            + 0,
+            Expect('downloadFile', dict(blocksize=32768, maxsize=None,
+                                        reader=ExpectRemoteRef(
+                                            remotetransfer.StringFileReader),
+                                        workerdest='.buildbot-diff', workdir='wkdir',
+                                        mode=None))
+            + 0,
+            Expect('downloadFile', dict(blocksize=32768, maxsize=None,
+                                        reader=ExpectRemoteRef(
+                                            remotetransfer.StringFileReader),
+                                        workerdest='.buildbot-patched', workdir='wkdir',
+                                        mode=None))
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['patch', '-p1', '--remove-empty-files',
+                                 '--force', '--forward', '-i', '.buildbot-diff'])
+            + 0,
+            Expect('rmdir', dict(dir='wkdir/.buildbot-diff',
+                                 logEnviron=True))
+            + 0,
+        )
+        self.expectOutcome(result=SUCCESS)
+        self.expectProperty('got_revision', '2012-09-09 12:00:39 +0000', 'CVS')
+        return self.runStep()
+
+    def test_mode_full_clean_patch_worker_2_16(self):
+        self.setupStep(
+            cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
+                    cvsmodule="mozilla/browser/", mode='full', method='clean'),
+            patch=(1, 'patch'),
+            worker_version={'*': '2.16'})
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -135,18 +266,21 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
                                       slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
                                       slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
                                       slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvsdiscard'])
@@ -154,13 +288,15 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
             ExpectShell(workdir='wkdir',
                         command=['cvs', '-z3', 'update', '-dP'])
             + 0,
-            Expect('downloadFile', dict(blocksize=16384, maxsize=None,
-                                        reader=ExpectRemoteRef(_FileReader),
+            Expect('downloadFile', dict(blocksize=32768, maxsize=None,
+                                        reader=ExpectRemoteRef(
+                                            remotetransfer.StringFileReader),
                                         slavedest='.buildbot-diff', workdir='wkdir',
                                         mode=None))
             + 0,
-            Expect('downloadFile', dict(blocksize=16384, maxsize=None,
-                                        reader=ExpectRemoteRef(_FileReader),
+            Expect('downloadFile', dict(blocksize=32768, maxsize=None,
+                                        reader=ExpectRemoteRef(
+                                            remotetransfer.StringFileReader),
                                         slavedest='.buildbot-patched', workdir='wkdir',
                                         mode=None))
             + 0,
@@ -180,7 +316,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                     cvsmodule="mozilla/browser/", mode='full', method='clean',
-                    login=True, timeout=1))
+                    timeout=1))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         timeout=1,
@@ -190,19 +326,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         timeout=1,
@@ -222,7 +361,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                     cvsmodule="mozilla/browser/", mode='full', method='clean',
-                    branch='branch', login=True))
+                    branch='branch'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -231,19 +370,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvsdiscard'])
@@ -260,8 +402,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_full_clean_branch_sourcestamp(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='full', method='clean',
-                    login=True), args={'branch': 'my_branch'})
+                    cvsmodule="mozilla/browser/", mode='full', method='clean'),
+            args={'branch': 'my_branch'})
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -270,19 +412,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvsdiscard'])
@@ -299,8 +444,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_full_fresh(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='full', method='fresh',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='full', method='fresh'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -309,19 +453,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvsdiscard', '--ignore'])
@@ -337,8 +484,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
 
     def test_mode_full_clobber(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                       cvsmodule="mozilla/browser/", mode='full', method='clobber',
-                       login=True)
+                       cvsmodule="mozilla/browser/", mode='full', method='clobber')
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -366,7 +512,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_full_clobber_retry(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                        cvsmodule="mozilla/browser/", mode='full', method='clobber',
-                       login=True, retry=(0, 2))
+                       retry=(0, 2))
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -413,8 +559,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
 
     def test_mode_full_copy(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                       cvsmodule="mozilla/browser/", mode='full', method='copy',
-                       login=True)
+                       cvsmodule="mozilla/browser/", mode='full', method='copy')
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -428,19 +573,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                  timeout=step.timeout))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='source/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='source/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='source/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='source/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='source/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='source/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='source',
                         command=['cvs', '-z3', 'update', '-dP'])
@@ -456,8 +604,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
 
     def test_mode_full_copy_wrong_repo(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                       cvsmodule="mozilla/browser/", mode='full', method='copy',
-                       login=True)
+                       cvsmodule="mozilla/browser/", mode='full', method='copy')
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -471,8 +618,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                  timeout=step.timeout))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='source/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Root', workdir='source/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('the-end-of-the-universe'))
             + 0,
             Expect('rmdir', dict(dir='source',
@@ -497,8 +644,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_incremental(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='incremental',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='incremental'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -507,19 +653,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvs', '-z3', 'update', '-dP'])
@@ -532,8 +681,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
 
     def test_mode_incremental_sticky_date(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                       cvsmodule="mozilla/browser/", mode='incremental',
-                       login=True)
+                       cvsmodule="mozilla/browser/", mode='incremental')
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -543,19 +691,23 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//D2013.10.08.11.20.33\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString('/file/1.1/Fri May 17 23:20:00//D2013.10.08.11.20.33\nD'))
             + 0,
             Expect('rmdir', dict(dir='wkdir',
                                  logEnviron=True,
@@ -576,8 +728,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_incremental_password_windows(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:dustin:secrets@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='incremental',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='incremental'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -586,20 +737,21 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             # on Windows, this file does not contain the password, per
             # http://trac.buildbot.net/ticket/2355
-            + Expect.behavior(uploadString(':pserver:dustin@cvs-mirror.mozilla.org:/cvsroot'))
+            + Expect.behavior(
+                uploadString(':pserver:dustin@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
@@ -614,7 +766,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                     cvsmodule="mozilla/browser/", mode='incremental',
-                    branch='my_branch', login=True))
+                    branch='my_branch'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -623,19 +775,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvs', '-z3', 'update', '-dP', '-r', 'my_branch'])
@@ -650,7 +805,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                     cvsmodule="mozilla/browser/", mode='incremental',
-                    branch='HEAD', login=True),
+                    branch='HEAD'),
             args=dict(revision='2012-08-16 16:05:16 +0000'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -660,23 +815,27 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvs', '-z3', 'update', '-dP',
-                                 # note, no -r HEAD here - that's the special case
+                                 # note, no -r HEAD here - that's the special
+                                 # case
                                  '-D', '2012-08-16 16:05:16 +0000'])
             + 0,
         )
@@ -687,8 +846,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_incremental_branch_sourcestamp(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='incremental',
-                    login=True), args={'branch': 'my_branch'})
+                    cvsmodule="mozilla/browser/", mode='incremental'),
+            args={'branch': 'my_branch'})
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -697,19 +856,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvs', '-z3', 'update', '-dP', '-r', 'my_branch'])
@@ -723,34 +885,31 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_incremental_not_loggedin(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='incremental',
-                    login=False))
+                    cvsmodule="mozilla/browser/", mode='incremental'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
-            + 0,
-            ExpectShell(workdir='wkdir',
-                        command=['cvs', '-d',
-                                 ':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot',
-                                 'login'])
             + 0,
             Expect('stat', dict(file='wkdir/.buildbot-patched',
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvs', '-z3', 'update', '-dP'])
@@ -763,8 +922,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
 
     def test_mode_incremental_no_existing_repo(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                       cvsmodule="mozilla/browser/", mode='incremental',
-                       login=True)
+                       cvsmodule="mozilla/browser/", mode='incremental')
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -774,8 +932,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
                                  logEnviron=True,
@@ -795,7 +953,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_incremental_retry(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                        cvsmodule="mozilla/browser/", mode='incremental',
-                       login=True, retry=(0, 1))
+                       retry=(0, 1))
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -805,8 +963,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
                                  logEnviron=True,
@@ -835,8 +993,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
 
     def test_mode_incremental_wrong_repo(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                       cvsmodule="mozilla/browser/", mode='incremental',
-                       login=True)
+                       cvsmodule="mozilla/browser/", mode='incremental')
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -846,8 +1003,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('the-end-of-the-universe'))
             + 0,
             Expect('rmdir', dict(dir='wkdir',
@@ -867,8 +1024,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
 
     def test_mode_incremental_wrong_module(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                       cvsmodule="mozilla/browser/", mode='incremental',
-                       login=True)
+                       cvsmodule="mozilla/browser/", mode='incremental')
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -878,13 +1034,15 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('the-end-of-the-universe'))
             + 0,
             Expect('rmdir', dict(dir='wkdir',
@@ -905,8 +1063,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_full_clean_no_existing_repo(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='full', method='clean',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='full', method='clean'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -915,8 +1072,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + 1,
             ExpectShell(workdir='',
                         command=['cvs',
@@ -932,8 +1089,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_full_clean_wrong_repo(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='full', method='clean',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='full', method='clean'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -942,8 +1098,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('the-end-of-the-universe'))
             + 0,
             ExpectShell(workdir='',
@@ -960,8 +1116,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_full_no_method(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='full',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='full'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -970,19 +1125,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvsdiscard', '--ignore'])
@@ -999,7 +1157,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_mode_incremental_with_options(self):
         step = cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                        cvsmodule="mozilla/browser/", mode='incremental',
-                       login=True, global_options=['-q'], extra_options=['-l'])
+                       global_options=['-q'], extra_options=['-l'])
         self.setupStep(step)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
@@ -1009,8 +1167,8 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
                                  logEnviron=True,
@@ -1030,7 +1188,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
                     cvsmodule="mozilla/browser/", mode='incremental',
-                    login=True, env={'abc': '123'}, logEnviron=False))
+                    env={'abc': '123'}, logEnviron=False))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'],
@@ -1041,19 +1199,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=False))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvs', '-z3', 'update', '-dP'],
@@ -1069,8 +1230,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_command_fails(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='incremental',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='incremental'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -1083,8 +1243,7 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_cvsdiscard_fails(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='full', method='fresh',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='full', method='fresh'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])
@@ -1093,19 +1252,22 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Root', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
+                                      workersrc='Root', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(
+                uploadString(':pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Repository', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
+                                      workersrc='Repository', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
             + Expect.behavior(uploadString('mozilla/browser/'))
             + 0,
             Expect('uploadFile', dict(blocksize=32768, maxsize=None,
-                                      slavesrc='Entries', workdir='wkdir/CVS',
-                                      writer=ExpectRemoteRef(shell.StringFileWriter)))
-            + Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
+                                      workersrc='Entries', workdir='wkdir/CVS',
+                                      writer=ExpectRemoteRef(remotetransfer.StringFileWriter)))
+            +
+            Expect.behavior(uploadString('/file/1.1/Fri May 17 23:20:00//\nD'))
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['cvsdiscard', '--ignore'])
@@ -1117,11 +1279,10 @@ class TestCVS(sourcesteps.SourceStepMixin, unittest.TestCase):
         self.expectOutcome(result=FAILURE)
         return self.runStep()
 
-    def test_slave_connection_lost(self):
+    def test_worker_connection_lost(self):
         self.setupStep(
             cvs.CVS(cvsroot=":pserver:anonymous@cvs-mirror.mozilla.org:/cvsroot",
-                    cvsmodule="mozilla/browser/", mode='full', method='clean',
-                    login=True))
+                    cvsmodule="mozilla/browser/", mode='full', method='clean'))
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['cvs', '--version'])

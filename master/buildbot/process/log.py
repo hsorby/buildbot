@@ -15,13 +15,14 @@
 
 import re
 
-from buildbot import util
-from buildbot.util import lineboundaries
 from twisted.internet import defer
 from twisted.python import log
 
+from buildbot import util
+from buildbot.util import lineboundaries
 
-class Log(object):
+
+class Log:
     _byType = {}
 
     def __init__(self, master, name, type, logid, decoder):
@@ -39,14 +40,19 @@ class Log(object):
 
     @staticmethod
     def _decoderFromString(cfg):
-        if isinstance(cfg, basestring):
+        """
+        Return a decoder function.
+        If cfg is a string such as 'latin-1' or u'latin-1',
+        then we return a new lambda, s.decode().
+        If cfg is already a lambda or function, then we return that.
+        """
+        if isinstance(cfg, (bytes, str)):
             return lambda s: s.decode(cfg, 'replace')
-        else:
-            return cfg
+        return cfg
 
     @classmethod
     def new(cls, master, name, type, logid, logEncoding):
-        type = unicode(type)
+        type = str(type)
         try:
             subcls = cls._byType[type]
         except KeyError:
@@ -70,9 +76,7 @@ class Log(object):
         # formatted for the log type, and newline-terminated
         assert lines[-1] == '\n'
         assert not self.finished
-        yield self.lock.acquire()
-        yield self.master.data.updates.appendLog(self.logid, lines)
-        yield self.lock.release()
+        yield self.lock.run(lambda: self.master.data.updates.appendLog(self.logid, lines))
 
     # completion
 
@@ -90,9 +94,11 @@ class Log(object):
     @defer.inlineCallbacks
     def finish(self):
         assert not self.finished
-        self.finished = True
-        yield self.master.data.updates.finishLog(self.logid)
 
+        def fToRun():
+            self.finished = True
+            return self.master.data.updates.finishLog(self.logid)
+        yield self.lock.run(fToRun)
         # notify subscribers *after* finishing the log
         self.subPoint.deliver(None, None)
 
@@ -103,7 +109,8 @@ class Log(object):
         # start a compressLog call but don't make our caller wait for
         # it to complete
         d = self.master.data.updates.compressLog(self.logid)
-        d.addErrback(log.err, "while compressing log %d (ignored)" % self.logid)
+        d.addErrback(
+            log.err, "while compressing log %d (ignored)" % self.logid)
 
 
 class PlainLog(Log):
@@ -112,7 +119,7 @@ class PlainLog(Log):
         super(PlainLog, self).__init__(master, name, type, logid, decoder)
 
         def wholeLines(lines):
-            if not isinstance(lines, unicode):
+            if not isinstance(lines, str):
                 lines = self.decoder(lines)
             self.subPoint.deliver(None, lines)
             return self.addRawLines(lines)
@@ -120,7 +127,7 @@ class PlainLog(Log):
 
     def addContent(self, text):
         # add some text in the log's default stream
-        self.lbf.append(text)
+        return self.lbf.append(text)
 
     @defer.inlineCallbacks
     def finish(self):
@@ -132,12 +139,14 @@ class TextLog(PlainLog):
 
     pass
 
+
 Log._byType['t'] = TextLog
 
 
 class HtmlLog(PlainLog):
 
     pass
+
 
 Log._byType['h'] = HtmlLog
 
@@ -155,13 +164,13 @@ class StreamLog(Log):
             return self.lbfs[stream]
         except KeyError:
             def wholeLines(lines):
-                if not isinstance(lines, unicode):
+                if not isinstance(lines, str):
                     lines = self.decoder(lines)
                 # deliver the un-annotated version to subscribers
                 self.subPoint.deliver(stream, lines)
                 # strip the last character, as the regexp will add a
                 # prefix character after the trailing newline
-                self.addRawLines(self.pat.sub(stream, lines)[:-1])
+                return self.addRawLines(self.pat.sub(stream, lines)[:-1])
             lbf = self.lbfs[stream] = \
                 lineboundaries.LineBoundaryFinder(wholeLines)
             return lbf
@@ -180,5 +189,6 @@ class StreamLog(Log):
         for lbf in self.lbfs.values():
             yield lbf.flush()
         yield super(StreamLog, self).finish()
+
 
 Log._byType['s'] = StreamLog

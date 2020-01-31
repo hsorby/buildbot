@@ -13,16 +13,19 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.status.results import SUCCESS
+from twisted.trial import unittest
+
+from buildbot.process.results import SUCCESS
 from buildbot.steps.package.rpm import rpmlint
 from buildbot.test.fake.remotecommand import ExpectShell
 from buildbot.test.util import steps
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
-class TestRpmLint(steps.BuildStepMixin, unittest.TestCase):
+class TestRpmLint(steps.BuildStepMixin, TestReactorMixin, unittest.TestCase):
 
     def setUp(self):
+        self.setUpTestReactor()
         return self.setUpBuildStep()
 
     def tearDown(self):
@@ -31,16 +34,17 @@ class TestRpmLint(steps.BuildStepMixin, unittest.TestCase):
     def test_success(self):
         self.setupStep(rpmlint.RpmLint())
         self.expectCommands(
-            ExpectShell(workdir='wkdir', usePTY='slave-config',
+            ExpectShell(workdir='wkdir',
                         command=['rpmlint', '-i', '.'])
             + 0)
-        self.expectOutcome(result=SUCCESS, state_string='Finished checking RPM/SPEC issues')
+        self.expectOutcome(
+            result=SUCCESS, state_string='Finished checking RPM/SPEC issues')
         return self.runStep()
 
     def test_fileloc_success(self):
         self.setupStep(rpmlint.RpmLint(fileloc='RESULT'))
         self.expectCommands(
-            ExpectShell(workdir='wkdir', usePTY='slave-config',
+            ExpectShell(workdir='wkdir',
                         command=['rpmlint', '-i', 'RESULT'])
             + 0)
         self.expectOutcome(result=SUCCESS)
@@ -49,7 +53,7 @@ class TestRpmLint(steps.BuildStepMixin, unittest.TestCase):
     def test_config_success(self):
         self.setupStep(rpmlint.RpmLint(config='foo.cfg'))
         self.expectCommands(
-            ExpectShell(workdir='wkdir', usePTY='slave-config',
+            ExpectShell(workdir='wkdir',
                         command=['rpmlint', '-i', '-f', 'foo.cfg', '.'])
             + 0)
         self.expectOutcome(result=SUCCESS)

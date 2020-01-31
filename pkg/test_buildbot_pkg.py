@@ -15,11 +15,13 @@
 
 import os
 import shutil
-
+import sys
 from subprocess import call
 from subprocess import check_call
-from twisted.trial import unittest
 from textwrap import dedent
+
+from twisted.trial import unittest
+
 
 class BuildbotWWWPkg(unittest.TestCase):
     pkgName = "buildbot_www"
@@ -35,8 +37,9 @@ class BuildbotWWWPkg(unittest.TestCase):
         assert("scripts.js" in apps["%(epName)s"].resource.listNames())
         assert(apps["%(epName)s"].version.startswith("0."))
         assert(apps["%(epName)s"].description is not None)
-        print apps["%(epName)s"]
+        print(apps["%(epName)s"])
         """)
+
     @property
     def path(self):
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", *self.pkgPaths))
@@ -52,13 +55,13 @@ class BuildbotWWWPkg(unittest.TestCase):
         self.rmtree(os.path.join(self.path, "static"))
 
     def run_setup(self, cmd):
-        check_call("python setup.py " + cmd, shell=True, cwd=self.path)
+        check_call([sys.executable, 'setup.py', cmd], cwd=self.path)
 
     def check_correct_installation(self):
         # assert we can import buildbot_www
         # and that it has an endpoint with resource containing file "script.js"
         check_call([
-            'python', '-c', self.loadTestScript % dict(epName=self.epName)])
+            sys.executable, '-c', self.loadTestScript % dict(epName=self.epName)])
 
     def test_install(self):
         self.run_setup("install")
@@ -88,15 +91,22 @@ class BuildbotWWWPkg(unittest.TestCase):
         check_call("pip install dist/*.tar.gz", shell=True, cwd=self.path)
         self.check_correct_installation()
 
+
+class BuildbotMDWWWPkg(BuildbotWWWPkg):
+    pkgPaths = ["www"]
+
+
 class BuildbotConsolePkg(BuildbotWWWPkg):
     pkgName = "buildbot-console-view"
     pkgPaths = ["www", "console_view"]
     epName = "console_view"
 
+
 class BuildbotWaterfallPkg(BuildbotWWWPkg):
     pkgName = "buildbot-waterfall-view"
     pkgPaths = ["www", "waterfall_view"]
     epName = "waterfall_view"
+
 
 class BuildbotCodeparameterPkg(BuildbotWWWPkg):
     pkgName = "buildbot-codeparameter"

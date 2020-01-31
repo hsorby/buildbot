@@ -1,115 +1,74 @@
 # Travis CI configuration file
 # http://about.travis-ci.org/docs/
+dist: xenial
+addons:
+  postgresql: "9.4"
+  apt_packages:
+    - enchant
+    - aspell
+    - aspell-en
+    - ispell
+    - iamerican
+
+services:
+  - mysql
+  - postgresql
 
 language: python
 
 # Available Python versions:
 # http://about.travis-ci.org/docs/user/ci-environment/#Python-VM-images
 python:
-  # "2.5" -- not supported by Travis CI anymore
-  - "2.6"
-  - "2.7"
+  - "3.8"
 
 env:
-  - TWISTED=11.1.0 SQLALCHEMY=latest SQLALCHEMY_MIGRATE=0.7.1
-  - TWISTED=12.2.0 SQLALCHEMY=latest SQLALCHEMY_MIGRATE=0.7.1
-  - TWISTED=13.0.0 SQLALCHEMY=latest SQLALCHEMY_MIGRATE=0.7.1
-  - TWISTED=latest SQLALCHEMY=latest SQLALCHEMY_MIGRATE=latest
+  matrix:
+    # we now use travis only for real database testing
+    # travis containers do have much more optimized db installations
 
-matrix:
-  include:
-    # Test different versions of SQLAlchemy
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=0.6.0 SQLALCHEMY_MIGRATE=0.7.1
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=0.6.8 SQLALCHEMY_MIGRATE=0.7.1
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=0.7.0 SQLALCHEMY_MIGRATE=0.7.1
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=0.7.4 SQLALCHEMY_MIGRATE=0.7.1
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=0.7.8 SQLALCHEMY_MIGRATE=0.7.1
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=latest SQLALCHEMY_MIGRATE=0.6.1
-
-    # Test different versions of SQLAlchemy-migrate
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=latest SQLALCHEMY_MIGRATE=0.6.1
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=latest SQLALCHEMY_MIGRATE=0.7.1
-    - python: "2.7"
-      env: TWISTED=12.0.0 SQLALCHEMY=latest SQLALCHEMY_MIGRATE=0.7.2
-
-before_install:
-  # Disable SSH host key checking. Otherwize ssh will ask confirmation from
-  # command prompt.
-  - echo -e "Host github.com\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
-
-  # Install fresh Node.js from PPA
-  - sudo add-apt-repository -y ppa:chris-lea/node.js
-  - sudo apt-get update -qq
-  - sudo apt-get install -qq nodejs
+    - TWISTED=latest SQLALCHEMY=latest TESTS=coverage BUILDBOT_TEST_DB_URL=mysql+mysqldb://travis@127.0.0.1/bbtest?storage_engine=InnoDB
+    # Configuration that runs tests with real PostgreSQL database with pg8000 and psycopg2 drivers
+    - TWISTED=latest SQLALCHEMY=latest TESTS=coverage BUILDBOT_TEST_DB_URL=postgresql+psycopg2:///bbtest?user=postgres
+    - TWISTED=latest SQLALCHEMY=latest TESTS=coverage BUILDBOT_TEST_DB_URL=postgresql+pg8000:///bbtest?user=postgres
 
 # Dependencies installation commands
 install:
-  # Fetch objects and tags from upstream git repository.
-  # Required for proper work of `git describe`.
-  - git describe || true
-  - git remote add upstream git://github.com/buildbot/buildbot.git
-  - git fetch upstream --tags
-  - git fetch origin --tags
-  - |
-    DEPTH=300;
-    while [ "$(git describe 2> /dev/null)" == "" ]; do
-      DEPTH=$(($DEPTH+200));
-      git fetch origin --depth=$DEPTH --quiet;
-    done
+  - pip install -U pip
+  - pip install -r requirements-ci.txt
+  - pip install -r requirements-cidb.txt
+  - "if [ $TWISTED = trunk ]; then pip install git+https://github.com/twisted/twisted ; fi"
+  - "if [ $TWISTED != latest -a  $TWISTED != trunk ]; then pip install Twisted==$TWISTED ; fi"
+  - "if [ $SQLALCHEMY != latest ]; then pip install sqlalchemy==$SQLALCHEMY; fi"
 
-  # coveralls is the interface to coveralls.io; see after_success
-  - "echo 'travis_fold:start:coveralls'; pip install coveralls; echo 'travis_fold:end:coveralls'"
-  - "echo 'travis_fold:start:tw'; [ $TWISTED = latest ] || pip install Twisted==$TWISTED; echo 'travis_fold:end:tw'"
-  - "echo 'travis_fold:start:sa'; [ $SQLALCHEMY = latest ] || pip install sqlalchemy==$SQLALCHEMY; echo 'travis_fold:end:sa'"
-  - "echo 'travis_fold:start:sam'; [ $SQLALCHEMY_MIGRATE = latest ] || pip install sqlalchemy-migrate==$SQLALCHEMY_MIGRATE; echo 'travis_fold:end:sam'"
-  - (cd pkg;    python setup.py develop)
-  - (cd master; python setup.py develop)
-  - (cd slave;  python setup.py develop)
-  # mock is preinstalled on Travis
-  # txgithub requires Twisted >= 12.3.0
-  - pip install txgithub
-  # txrequests support only Python 2.6 and 2.7.
-  - pip install txrequests
 
-  # Determine if current configuration is latest
-  - |
-    if [[ $TWISTED == latest && \
-          $SQLALCHEMY = latest && $SQLALCHEMY_MIGRATE = latest ]]; then
-      export IS_LATEST=true
-    else
-      export IS_LATEST=false
-    fi;
-
-  # Run additional tests only in latest configuration
-  # Note pylint version is pinned because newer versions can't import zope.interface - http://www.logilab.org/92792
-  - "[ $IS_LATEST = false ] || pip install pylint==1.1.0"
-  - "[ $IS_LATEST = false ] || pip install pyflakes"
-  - "[ $IS_LATEST = false ] || pip install sphinx"
-  - "[ $IS_LATEST = false ] || pip install pep8"
+before_script:
+  # create real MySQL database for tests
+  - mysql -e 'create database bbtest;'
+  # create real PostgreSQL database for tests
+  - psql -c 'create database bbtest;' -U postgres
 
 # Tests running commands
 script:
-  - "[ $IS_LATEST = false ] || make frontend_install_tests"
-  # run tests under coverage for latest only (it's slower..)
-  - "[ $IS_LATEST = true ] ||                                            trial  --reporter=text --rterrors buildbot.test buildslave.test"
-  - "[ $IS_LATEST = false ] || coverage run --rcfile=.coveragerc $(which trial) --reporter=text --rterrors buildbot.test buildslave.test"
+  # run real db tests under coverage to have several merging coverage report
+  # https://github.com/codecov/support/wiki/Merging-Reports
+  - "if [ $TESTS = coverage ]; then coverage run --rcfile=.coveragerc $(which trial) --reporter=text --rterrors buildbot.test buildbot_worker.test ; fi"
 
-  # Run additional tests only in latest configuration
-  - "[ $IS_LATEST = false ] || make pylint"
-  - "[ $IS_LATEST = false ] || make pyflakes"
-  - "[ $IS_LATEST = false ] || make docs"
-  - "[ $IS_LATEST = false ] || make pep8"
 
 notifications:
   email: false
 
 after_success:
-  - "[ $IS_LATEST = false ] || coveralls"
+  - "if [ $TESTS = coverage ]; then codecov ; fi"
+
+after_script:
+  # List installed packages along with their versions.
+  - "pip list"
+
+sudo: false
+branches:
+  # Only build main-line branches.
+  only:
+    - master
+    - eight
+git:
+  depth: 300

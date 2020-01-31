@@ -57,7 +57,7 @@ Deprecations, Removals, and Non-Compatible Changes
                             builderNames=["b1", "b2", ... ]))
 
   Where all of the builder names in the configuration are listed.  See the
-  documentation for the *much* more flexiblie configuration options now
+  documentation for the *much* more flexible configuration options now
   available.
 
 * This is the last release of Buildbot that will be compatible with Python 2.4.
@@ -77,7 +77,7 @@ Deprecations, Removals, and Non-Compatible Changes
   parameter and call its :py:meth:`~buildbot.config.ConfigErrors.addError`
   method to indicate errors.
 
-* The gerrit status callback now gets an additional parameter (the master
+* The Gerrit status callback now gets an additional parameter (the master
   status).  If you use this callback, you will need to adjust its
   implementation.
 
@@ -102,11 +102,11 @@ Deprecations, Removals, and Non-Compatible Changes
   ``--revision`` when ``alwaysUseLatest`` is set to ``False`` when in the
   ``full`` mode. See :bug:`2194`
 
-* Master Side :bb:step:`SVN` Step paramater svnurl has been renamed repourl, to
+* Master Side :bb:step:`SVN` Step parameter svnurl has been renamed repourl, to
   be consistent with other master-side source steps.
 
 * Master Side :bb:step:`Mercurial` step parameter ``baseURL`` has been merged
-  with ``repourl`` parameter. The behavior of the step is already controled by
+  with ``repourl`` parameter. The behavior of the step is already controlled by
   ``branchType`` parameter, so just use a single argument to specify the repository.
 
 * Passing a :py:class:`buildbot.process.buildstep.BuildStep` subclass (rather than
@@ -160,7 +160,7 @@ Features
   in :pull:`278`.
 
 * The master-side SVN step now has an `export` method which is similar to
-  `copy`, but the build directory does not contain Subversion metdata. (:bug:`2078`)
+  `copy`, but the build directory does not contain Subversion metadata. (:bug:`2078`)
 
 * :py:class:`Property` instances will now render any properties in the
   default value if necessary.  This makes possible constructs like ::
@@ -184,7 +184,7 @@ Features
   all the triggered builds. This URL is displayed in the waterfall and build
   details. See :bug:`2170`.
 
-* The :src:`master/contrib/fakemaster.py`` script allows you to run arbitrary commands on a slave by emulating a master.
+* The ``master/contrib/fakemaster.py`` script allows you to run arbitrary commands on a slave by emulating a master.
   See the file itself for documentation.
 
 * MailNotifier allows multiple notification modes in the same instance.  See
@@ -218,4 +218,4 @@ Git log itself:
 Older Versions
 --------------
 
-Release notes for older versions of Buildbot are available in the :src:`master/docs/release-notes/` directory of the source tree, or in the archived documentation for those versions at http://buildbot.net/buildbot/docs.
+Release notes for older versions of Buildbot are available in the :src:`master/docs/relnotes/` directory of the source tree, or in the archived documentation for those versions at http://buildbot.net/buildbot/docs.

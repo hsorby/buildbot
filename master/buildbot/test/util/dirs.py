@@ -13,13 +13,14 @@
 #
 # Copyright Buildbot Team Members
 
+
 import os
 import shutil
 
 from twisted.internet import defer
 
 
-class DirsMixin(object):
+class DirsMixin:
 
     _dirs = None
 

@@ -13,13 +13,16 @@
 #
 # Copyright Buildbot Team Members
 
+
 import inspect
 import pkg_resources
 
+import zope.interface.interface
 from twisted.trial import unittest
+from zope.interface.interface import Attribute
 
 
-class InterfaceTests(object):
+class InterfaceTests:
 
     # assertions
 
@@ -42,7 +45,7 @@ class InterfaceTests(object):
             args = spec[0]
             defaults = list(spec[3] if spec[3] is not None else [])
             di = -1
-            for ai in xrange(len(args) - 1, -1, -1):
+            for ai in range(len(args) - 1, -1, -1):
                 arg = args[ai]
                 if arg.startswith('_') or (arg == 'self' and ai == 0):
                     del args[ai]
@@ -55,9 +58,13 @@ class InterfaceTests(object):
 
         def remove_decorators(func):
             try:
-                return func.func_original
+                return func.__wrapped__
             except AttributeError:
                 return func
+
+        def filter_argspec(func):
+            return filter(
+                inspect.getfullargspec(remove_decorators(func)))
 
         def assert_same_argspec(expected, actual):
             if expected != actual:
@@ -66,17 +73,14 @@ class InterfaceTests(object):
                     inspect.formatargspec(*actual))
                 self.fail(msg)
 
-        actual_argspec = filter(
-            inspect.getargspec(remove_decorators(actualMethod)))
+        actual_argspec = filter_argspec(actualMethod)
 
         for fakeMethod in fakeMethods:
-            fake_argspec = filter(
-                inspect.getargspec(remove_decorators(fakeMethod)))
+            fake_argspec = filter_argspec(fakeMethod)
             assert_same_argspec(actual_argspec, fake_argspec)
 
         def assert_same_argspec_decorator(decorated):
-            expected_argspec = filter(
-                inspect.getargspec(remove_decorators(decorated)))
+            expected_argspec = filter_argspec(decorated)
             assert_same_argspec(expected_argspec, actual_argspec)
             # The decorated function works as usual.
             return decorated
@@ -89,9 +93,9 @@ class InterfaceTests(object):
         zi_vers = pkg_resources.working_set.find(
             pkg_resources.Requirement.parse('zope.interface')).version
         if pkg_resources.parse_version(zi_vers) < pkg_resources.parse_version('4.1.1'):
-            raise unittest.SkipTest("zope.interfaces is too old to run this test")
+            raise unittest.SkipTest(
+                "zope.interfaces is too old to run this test")
 
-        import zope.interface.interface
         for interface in zope.interface.implementedBy(cls):
             for attr, template_argspec in interface.namesAndDescriptions():
                 if not hasattr(cls, attr):
@@ -100,9 +104,13 @@ class InterfaceTests(object):
                         interface)
                     self.fail(msg)
                 actual_argspec = getattr(cls, attr)
-                while hasattr(actual_argspec, 'func_original'):
-                    actual_argspec = actual_argspec.func_original
-                actual_argspec = zope.interface.interface.fromMethod(actual_argspec)
+                if isinstance(template_argspec, Attribute):
+                    continue
+                # else check method signatures
+                while hasattr(actual_argspec, '__wrapped__'):
+                    actual_argspec = actual_argspec.__wrapped__
+                actual_argspec = zope.interface.interface.fromMethod(
+                    actual_argspec)
 
                 if actual_argspec.getSignatureInfo() != template_argspec.getSignatureInfo():
                     msg = "%s: expected: %s; got: %s" % (

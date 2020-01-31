@@ -13,15 +13,19 @@
 #
 # Copyright Buildbot Team Members
 
+
 import mock
 
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot.data import properties
+from buildbot.process.properties import Properties as processProperties
 from buildbot.test.fake import fakedb
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import endpoint
 from buildbot.test.util import interfaces
-from twisted.internet import defer
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
 class BuildsetPropertiesEndpoint(endpoint.EndpointMixin, unittest.TestCase):
@@ -46,13 +50,11 @@ class BuildsetPropertiesEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def tearDown(self):
         self.tearDownEndpoint()
 
+    @defer.inlineCallbacks
     def test_get_properties(self):
-        d = self.callGet(('buildsets', 14, 'properties'))
+        props = yield self.callGet(('buildsets', 14, 'properties'))
 
-        @d.addCallback
-        def check(props):
-            self.assertEqual(props, {u'prop': (22, u'fakedb')})
-        return d
+        self.assertEqual(props, {'prop': (22, 'fakedb')})
 
 
 class BuildPropertiesEndpoint(endpoint.EndpointMixin, unittest.TestCase):
@@ -66,29 +68,32 @@ class BuildPropertiesEndpoint(endpoint.EndpointMixin, unittest.TestCase):
             fakedb.Buildset(id=28),
             fakedb.BuildRequest(id=5, buildsetid=28),
             fakedb.Master(id=3),
-            fakedb.Buildslave(id=42, name="Friday"),
-            fakedb.Build(id=786, buildrequestid=5, masterid=3, buildslaveid=42),
-            fakedb.BuildProperty(buildid=786, name="year", value=1651, source="Wikipedia"),
-            fakedb.BuildProperty(buildid=786, name="island_name", value="despair", source="Book"),
+            fakedb.Worker(id=42, name="Friday"),
+            fakedb.Build(id=786, buildrequestid=5, masterid=3, workerid=42),
+            fakedb.BuildProperty(
+                buildid=786, name="year", value=1651, source="Wikipedia"),
+            fakedb.BuildProperty(
+                buildid=786, name="island_name", value="despair", source="Book"),
         ])
 
     def tearDown(self):
         self.tearDownEndpoint()
 
+    @defer.inlineCallbacks
     def test_get_properties(self):
-        d = self.callGet(('builds', 786, 'properties'))
+        props = yield self.callGet(('builds', 786, 'properties'))
 
-        @d.addCallback
-        def check(props):
-            self.assertEqual(props, {u'year': (1651, u'Wikipedia'), u'island_name': ("despair", u'Book')})
-        return d
+        self.assertEqual(props, {'year': (1651, 'Wikipedia'),
+                         'island_name': ("despair", 'Book')})
 
 
-class Properties(interfaces.InterfaceTests, unittest.TestCase):
+class Properties(interfaces.InterfaceTests, TestReactorMixin,
+                 unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self,
-                                             wantMq=False, wantDb=True, wantData=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=False, wantDb=True,
+                                             wantData=True)
         self.rtype = properties.Properties(self.master)
 
     @defer.inlineCallbacks
@@ -99,7 +104,8 @@ class Properties(interfaces.InterfaceTests, unittest.TestCase):
         setattr(self.master.db.builds, dbMethodName, m)
         res = yield method(*args, **kwargs)
         self.assertIdentical(res, rv)
-        m.assert_called_with(*(exp_args or args), **((exp_kwargs is None) and kwargs or exp_kwargs))
+        m.assert_called_with(
+            *(exp_args or args), **((exp_kwargs is None) and kwargs or exp_kwargs))
 
     def test_signature_setBuildProperty(self):
         @self.assertArgSpecMatches(
@@ -112,3 +118,44 @@ class Properties(interfaces.InterfaceTests, unittest.TestCase):
         return self.do_test_callthrough('setBuildProperty', self.rtype.setBuildProperty,
                                         buildid=1234, name='property', value=[42, 45], source='testsuite',
                                         exp_args=(1234, 'property', [42, 45], 'testsuite'), exp_kwargs={})
+
+    @defer.inlineCallbacks
+    def test_setBuildProperties(self):
+        self.master.db.insertTestData([
+            fakedb.Buildset(id=28),
+            fakedb.BuildRequest(id=5, buildsetid=28),
+            fakedb.Master(id=3),
+            fakedb.Worker(id=42, name="Friday"),
+            fakedb.Build(id=1234, buildrequestid=5, masterid=3, workerid=42),
+        ])
+
+        self.master.db.builds.setBuildProperty = mock.Mock(
+            wraps=self.master.db.builds.setBuildProperty)
+        props = processProperties.fromDict(
+            dict(a=(1, 't'), b=(['abc', 9], 't')))
+        yield self.rtype.setBuildProperties(1234, props)
+        setBuildPropertiesCalls = sorted(self.master.db.builds.setBuildProperty.mock_calls)
+        self.assertEqual(setBuildPropertiesCalls, [
+            mock.call(1234, 'a', 1, 't'),
+            mock.call(1234, 'b', ['abc', 9], 't')])
+        self.master.mq.assertProductions([
+            (('builds', '1234', 'properties', 'update'),
+             {'a': (1, 't'), 'b': (['abc', 9], 't')}),
+        ])
+        # sync without changes: no db write
+        self.master.db.builds.setBuildProperty.reset_mock()
+        self.master.mq.clearProductions()
+        yield self.rtype.setBuildProperties(1234, props)
+        self.master.db.builds.setBuildProperty.assert_not_called()
+        self.master.mq.assertProductions([])
+
+        # sync with one changes: one db write
+        props.setProperty('b', 2, 'step')
+        self.master.db.builds.setBuildProperty.reset_mock()
+        yield self.rtype.setBuildProperties(1234, props)
+
+        self.master.db.builds.setBuildProperty.assert_called_with(
+            1234, 'b', 2, 'step')
+        self.master.mq.assertProductions([
+            (('builds', '1234', 'properties', 'update'), {'b': (2, 'step')})
+        ])

@@ -13,27 +13,35 @@
 #
 # Copyright Buildbot Team Members
 
-
 import calendar
 import datetime
-import dateutil.tz
+import itertools
+import json
 import locale
 import re
-import string
+import sys
+import textwrap
 import time
-import types
-import urlparse
+from builtins import bytes
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
+
+import dateutil.tz
 
 from twisted.python import reflect
+from twisted.python.deprecate import deprecatedModuleAttribute
+from twisted.python.versions import Version
+from zope.interface import implementer
 
 from buildbot.interfaces import IConfigured
+from buildbot.util.giturlparse import giturlparse
 from buildbot.util.misc import deferredLocked
 
-from zope.interface import implements
+from ._notifier import Notifier
 
 
-def naturalSort(l):
-    l = l[:]
+def naturalSort(array):
+    array = array[:]
 
     def try_int(s):
         try:
@@ -44,29 +52,47 @@ def naturalSort(l):
     def key_func(item):
         return [try_int(s) for s in re.split(r'(\d+)', item)]
     # prepend integer keys to each element, sort them, then strip the keys
-    keyed_l = sorted([(key_func(i), i) for i in l])
-    l = [i[1] for i in keyed_l]
-    return l
+    keyed_array = sorted([(key_func(i), i) for i in array])
+    array = [i[1] for i in keyed_array]
+    return array
 
 
-def flatten(l, types=list):
-    if l and isinstance(l, types):
-        rv = []
-        for e in l:
-            if isinstance(e, types):
-                rv.extend(flatten(e))
-            else:
-                rv.append(e)
-        return rv
-    else:
+def flattened_iterator(l, types=(list, tuple)):
+    """
+    Generator for a list/tuple that potentially contains nested/lists/tuples of arbitrary nesting
+    that returns every individual non-list/tuple element.  In other words, [(5, 6, [8, 3]), 2, [2, 1, (3, 4)]]
+    will yield 5, 6, 8, 3, 2, 2, 1, 3, 4
+
+    This is safe to call on something not a list/tuple - the original input is yielded.
+    """
+    if not isinstance(l, types):
+        yield l
+        return
+
+    for element in l:
+        for sub_element in flattened_iterator(element, types):
+            yield sub_element
+
+
+def flatten(l, types=(list, )):
+    """
+    Given a list/tuple that potentially contains nested lists/tuples of arbitrary nesting,
+    flatten into a single dimension.  In other words, turn [(5, 6, [8, 3]), 2, [2, 1, (3, 4)]]
+    into [5, 6, 8, 3, 2, 2, 1, 3, 4]
+
+    This is safe to call on something not a list/tuple - the original input is returned as a list
+    """
+    # For backwards compatibility, this returned a list, not an iterable.
+    # Changing to return an iterable could break things.
+    if not isinstance(l, types):
         return l
+    return list(flattened_iterator(l, types))
 
 
 def now(_reactor=None):
     if _reactor and hasattr(_reactor, "seconds"):
         return _reactor.seconds()
-    else:
-        return time.time()
+    return time.time()
 
 
 def formatInterval(eta):
@@ -81,9 +107,47 @@ def formatInterval(eta):
     return ", ".join(eta_parts)
 
 
-class ComparableMixin(object):
-    implements(IConfigured)
-    compare_attrs = []
+def fuzzyInterval(seconds):
+    """
+    Convert time interval specified in seconds into fuzzy, human-readable form
+    """
+    if seconds <= 1:
+        return "a moment"
+    if seconds < 20:
+        return "{:d} seconds".format(seconds)
+    if seconds < 55:
+        return "{:d} seconds".format(round(seconds / 10.) * 10)
+    minutes = round(seconds / 60.)
+    if minutes == 1:
+        return "a minute"
+    if minutes < 20:
+        return "{:d} minutes".format(minutes)
+    if minutes < 55:
+        return "{:d} minutes".format(round(minutes / 10.) * 10)
+    hours = round(minutes / 60.)
+    if hours == 1:
+        return "an hour"
+    if hours < 24:
+        return "{:d} hours".format(hours)
+    days = (hours + 6) // 24
+    if days == 1:
+        return "a day"
+    if days < 30:
+        return "{:d} days".format(days)
+    months = int((days + 10) / 30.5)
+    if months == 1:
+        return "a month"
+    if months < 12:
+        return "{} months".format(months)
+    years = round(days / 365.25)
+    if years == 1:
+        return "a year"
+    return "{} years".format(years)
+
+
+@implementer(IConfigured)
+class ComparableMixin:
+    compare_attrs = ()
 
     class _None:
         pass
@@ -97,14 +161,12 @@ class ComparableMixin(object):
                 [getattr(self, name, self._None) for name in compare_attrs]
         return hash(tuple(map(str, alist)))
 
-    def __cmp__(self, them):
-        result = cmp(type(self), type(them))
-        if result:
-            return result
+    def _cmp_common(self, them):
+        if type(self) != type(them):
+            return (False, None, None)
 
-        result = cmp(self.__class__, them.__class__)
-        if result:
-            return result
+        if self.__class__ != them.__class__:
+            return (False, None, None)
 
         compare_attrs = []
         reflect.accumulateClassList(
@@ -114,14 +176,51 @@ class ComparableMixin(object):
                      for name in compare_attrs]
         them_list = [getattr(them, name, self._None)
                      for name in compare_attrs]
-        return cmp(self_list, them_list)
+        return (True, self_list, them_list)
+
+    def __eq__(self, them):
+        (isComparable, self_list, them_list) = self._cmp_common(them)
+        if not isComparable:
+            return False
+        return self_list == them_list
+
+    def __ne__(self, them):
+        (isComparable, self_list, them_list) = self._cmp_common(them)
+        if not isComparable:
+            return True
+        return self_list != them_list
+
+    def __lt__(self, them):
+        (isComparable, self_list, them_list) = self._cmp_common(them)
+        if not isComparable:
+            return False
+        return self_list < them_list
+
+    def __le__(self, them):
+        (isComparable, self_list, them_list) = self._cmp_common(them)
+        if not isComparable:
+            return False
+        return self_list <= them_list
+
+    def __gt__(self, them):
+        (isComparable, self_list, them_list) = self._cmp_common(them)
+        if not isComparable:
+            return False
+        return self_list > them_list
+
+    def __ge__(self, them):
+        (isComparable, self_list, them_list) = self._cmp_common(them)
+        if not isComparable:
+            return False
+        return self_list >= them_list
 
     def getConfigDict(self):
         compare_attrs = []
         reflect.accumulateClassList(
             self.__class__, 'compare_attrs', compare_attrs)
-        return dict([(k, getattr(self, k)) for k in compare_attrs
-                     if hasattr(self, k) and k not in ("passwd", "password")])
+        return {k: getattr(self, k)
+                for k in compare_attrs
+                if hasattr(self, k) and k not in ("passwd", "password")}
 
 
 def diffSets(old, new):
@@ -131,16 +230,17 @@ def diffSets(old, new):
         new = set(new)
     return old - new, new - old
 
+
 # Remove potentially harmful characters from builder name if it is to be
 # used as the build dir.
-badchars_map = string.maketrans("\t !#$%&'()*+,./:;<=>?@[\\]^{|}~",
-                                "______________________________")
+badchars_map = bytes.maketrans(b"\t !#$%&'()*+,./:;<=>?@[\\]^{|}~",
+                               b"______________________________")
 
 
-def safeTranslate(str):
-    if isinstance(str, unicode):
-        str = str.encode('utf8')
-    return str.translate(badchars_map)
+def safeTranslate(s):
+    if isinstance(s, str):
+        s = s.encode('utf8')
+    return s.translate(badchars_map)
 
 
 def none_or_str(x):
@@ -149,30 +249,26 @@ def none_or_str(x):
     return x
 
 
-def ascii2unicode(x):
-    if isinstance(x, (unicode, types.NoneType)):
-        return x
-    return unicode(x, 'ascii')
+def unicode2bytes(x, encoding='utf-8', errors='strict'):
+    if isinstance(x, str):
+        x = x.encode(encoding, errors)
+    return x
 
-# place a working json module at 'buildbot.util.json'.  Code is adapted from
-# Paul Wise <pabs@debian.org>:
-#   http://lists.debian.org/debian-python/2010/02/msg00016.html
-# json doesn't exist as a standard module until python2.6
-# However python2.6's json module is much slower than simplejson, so we prefer
-# to use simplejson if available.
-try:
-    import simplejson as json
-    assert json
-except ImportError:
-    import json  # python 2.6 or 2.7
-try:
-    _tmp = json.loads
-except AttributeError:
-    import warnings
-    import sys
-    warnings.warn("Use simplejson, not the old json module.")
-    sys.modules.pop('json')  # get rid of the bad json module
-    import simplejson as json
+
+def bytes2unicode(x, encoding='utf-8', errors='strict'):
+    if isinstance(x, (str, type(None))):
+        return x
+    return str(x, encoding, errors)
+
+
+_hush_pyflakes = [json]
+
+deprecatedModuleAttribute(
+    Version("buildbot", 0, 9, 4),
+    message="Use json from the standard library instead.",
+    moduleName="buildbot.util",
+    name="json",
+)
 
 
 def toJson(obj):
@@ -187,8 +283,10 @@ def toJson(obj):
 
 class NotABranch:
 
-    def __nonzero__(self):
+    def __bool__(self):
         return False
+
+
 NotABranch = NotABranch()
 
 # time-handling methods
@@ -201,21 +299,50 @@ def epoch2datetime(epoch):
     """Convert a UNIX epoch time to a datetime object, in the UTC timezone"""
     if epoch is not None:
         return datetime.datetime.fromtimestamp(epoch, tz=UTC)
+    return None
 
 
 def datetime2epoch(dt):
     """Convert a non-naive datetime object to a UNIX epoch timestamp"""
     if dt is not None:
         return calendar.timegm(dt.utctimetuple())
+    return None
+
+
+# TODO: maybe "merge" with formatInterval?
+def human_readable_delta(start, end):
+    """
+    Return a string of human readable time delta.
+    """
+    start_date = datetime.datetime.fromtimestamp(start)
+    end_date = datetime.datetime.fromtimestamp(end)
+    delta = end_date - start_date
+
+    result = []
+    if delta.days > 0:
+        result.append('%d days' % (delta.days,))
+    if delta.seconds > 0:
+        hours = int(delta.seconds / 3600)
+        if hours > 0:
+            result.append('%d hours' % (hours,))
+        minutes = int((delta.seconds - hours * 3600) / 60)
+        if minutes:
+            result.append('%d minutes' % (minutes,))
+        seconds = delta.seconds % 60
+        if seconds > 0:
+            result.append('%d seconds' % (seconds,))
+
+    if result:
+        return ', '.join(result)
+    return 'super fast'
 
 
 def makeList(input):
-    if isinstance(input, basestring):
+    if isinstance(input, str):
         return [input]
     elif input is None:
         return []
-    else:
-        return list(input)
+    return list(input)
 
 
 def in_reactor(f):
@@ -224,18 +351,18 @@ def in_reactor(f):
         from twisted.internet import reactor, defer
         result = []
 
-        def async():
+        def _async():
             d = defer.maybeDeferred(f, *args, **kwargs)
 
+            @d.addErrback
             def eb(f):
-                f.printTraceback()
-            d.addErrback(eb)
+                f.printTraceback(file=sys.stderr)
 
+            @d.addBoth
             def do_stop(r):
                 result.append(r)
                 reactor.stop()
-            d.addBoth(do_stop)
-        reactor.callWhenRunning(async)
+        reactor.callWhenRunning(_async)
         reactor.run()
         return result[0]
     wrap.__doc__ = f.__doc__
@@ -246,19 +373,23 @@ def in_reactor(f):
 
 def string2boolean(str):
     return {
-        'on': True,
-        'true': True,
-        'yes': True,
-        '1': True,
-        'off': False,
-        'false': False,
-        'no': False,
-        '0': False,
+        b'on': True,
+        b'true': True,
+        b'yes': True,
+        b'1': True,
+        b'off': False,
+        b'false': False,
+        b'no': False,
+        b'0': False,
     }[str.lower()]
 
 
-def asyncSleep(delay):
-    from twisted.internet import reactor, defer
+def asyncSleep(delay, reactor=None):
+    from twisted.internet import defer
+    from twisted.internet import reactor as internet_reactor
+    if reactor is None:
+        reactor = internet_reactor
+
     d = defer.Deferred()
     reactor.callLater(delay, d.callback, None)
     return d
@@ -267,10 +398,11 @@ def asyncSleep(delay):
 def check_functional_environment(config):
     try:
         locale.getdefaultlocale()
-    except KeyError:
+    except (KeyError, ValueError) as e:
         config.error("\n".join([
             "Your environment has incorrect locale settings. This means python cannot handle strings safely.",
-            "Please check 'LANG', 'LC_CTYPE', 'LC_ALL' and 'LANGUAGE' are either unset or set to a valid locale.",
+            " Please check 'LANG', 'LC_CTYPE', 'LC_ALL' and 'LANGUAGE'"
+            " are either unset or set to a valid locale.", str(e)
         ]))
 
 
@@ -278,21 +410,20 @@ _netloc_url_re = re.compile(r':[^@]*@')
 
 
 def stripUrlPassword(url):
-    parts = list(urlparse.urlsplit(url))
+    parts = list(urlsplit(url))
     parts[1] = _netloc_url_re.sub(':xxxx@', parts[1])
-    return urlparse.urlunsplit(parts)
+    return urlunsplit(parts)
 
 
 def join_list(maybeList):
     if isinstance(maybeList, (list, tuple)):
-        return u' '.join(ascii2unicode(s) for s in maybeList)
-    else:
-        return ascii2unicode(maybeList)
+        return ' '.join(bytes2unicode(s) for s in maybeList)
+    return bytes2unicode(maybeList)
 
 
 def command_to_string(command):
     words = command
-    if isinstance(words, (str, unicode)):
+    if isinstance(words, (bytes, str)):
         words = words.split()
 
     try:
@@ -308,25 +439,80 @@ def command_to_string(command):
 
     # strip instances and other detritus (which can happen if a
     # description is requested before rendering)
-    words = [w for w in words if isinstance(w, (str, unicode))]
+    stringWords = []
+    for w in words:
+        if isinstance(w, (bytes, str)):
+            # If command was bytes, be gentle in
+            # trying to covert it.
+            w = bytes2unicode(w, errors="replace")
+            stringWords.append(w)
+    words = stringWords
 
-    if len(words) < 1:
+    if not words:
         return None
     if len(words) < 3:
         rv = "'%s'" % (' '.join(words))
     else:
         rv = "'%s ...'" % (' '.join(words[:2]))
 
-    # cmd was a comand and thus probably a bytestring.  Be gentle in
-    # trying to covert it.
-    rv = rv.decode('ascii', 'replace')
-
     return rv
 
 
+def rewrap(text, width=None):
+    """
+    Rewrap text for output to the console.
+
+    Removes common indentation and rewraps paragraphs according to the console
+    width.
+
+    Line feeds between paragraphs preserved.
+    Formatting of paragraphs that starts with additional indentation
+    preserved.
+    """
+
+    if width is None:
+        width = 80
+
+    # Remove common indentation.
+    text = textwrap.dedent(text)
+
+    def needs_wrapping(line):
+        # Line always non-empty.
+        return not line[0].isspace()
+
+    # Split text by lines and group lines that comprise paragraphs.
+    wrapped_text = ""
+    for do_wrap, lines in itertools.groupby(text.splitlines(True),
+                                            key=needs_wrapping):
+        paragraph = ''.join(lines)
+
+        if do_wrap:
+            paragraph = textwrap.fill(paragraph, width)
+
+        wrapped_text += paragraph
+
+    return wrapped_text
+
+
+def dictionary_merge(a, b):
+    """merges dictionary b into a
+       Like dict.update, but recursive
+    """
+    for key, value in b.items():
+        if key in a and isinstance(a[key], dict) and isinstance(value, dict):
+            dictionary_merge(a[key], b[key])
+            continue
+        a[key] = b[key]
+    return a
+
+
 __all__ = [
-    'naturalSort', 'now', 'formatInterval', 'ComparableMixin', 'json',
+    'naturalSort', 'now', 'formatInterval', 'ComparableMixin',
     'safeTranslate', 'none_or_str',
     'NotABranch', 'deferredLocked', 'UTC',
     'diffSets', 'makeList', 'in_reactor', 'string2boolean',
-    'check_functional_environment']
+    'check_functional_environment', 'human_readable_delta',
+    'rewrap',
+    'Notifier',
+    "giturlparse",
+]

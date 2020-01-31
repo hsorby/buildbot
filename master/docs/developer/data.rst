@@ -11,16 +11,17 @@ Sections
 
 The data api is divided into four sections:
 
- * getters - fetching data from the db API, and
- * subscriptions - subscribing to messages from the mq layer;
- * control -  allows state to be changed in specific ways by sending appropriate messages (e.g., stopping a build); and
- * updates - direct updates to state appropriate messages.
+* getters - fetching data from the db API, and
+* subscriptions - subscribing to messages from the mq layer;
+* control - allows state to be changed in specific ways by sending appropriate messages (e.g., stopping a build); and
+* updates - direct updates to state appropriate messages.
 
 The getters and subscriptions are exposed everywhere.
 Access to the control section should be authenticated at higher levels, as the data layer does no authentication.
 The updates section is for use only by the process layer.
 
-The interfaces for all sections but the updates sections are intended to be language-agnostic.  That is, they should be callable from JavaScript via HTTP, or via some other interface added to Buildbot after the fact.
+The interfaces for all sections but the updates sections are intended to be language-agnostic.
+That is, they should be callable from JavaScript via HTTP, or via some other interface added to Buildbot after the fact.
 
 Getter
 ++++++
@@ -40,7 +41,7 @@ Implicit filters are supported.
 Control
 +++++++
 
-The control sections defines a set of actions that cause Buildbot to behave in a certain way, e.g., rebuilding a build or shutting down a slave.
+The control sections defines a set of actions that cause Buildbot to behave in a certain way, e.g., rebuilding a build or shutting down a worker.
 Actions correspond to a particular resource, although sometimes that resource is the root resource (an empty tuple).
 
 Updates
@@ -65,8 +66,8 @@ Within the buildmaster process, the root of the data API is available at `self.m
 
     This class implements the root of the data API.
     Within the buildmaster process, the data connector is available at `self.master.data`.
-    The first three sections are implemented with the :py:meth:`get`, :py:meth:`startConsuming`, and :py:meth:`control` methods, respectively, while the updates section is implemented using the :py:attr:`updates` attribute.
-    The ``path`` arguments to these methods should always be tuples.  Integer arguments can be presented as either integers or strings that can be parsed by ``int``; all other arguments must be strings.
+    The first three sections are implemented with the :py:meth:`get` and :py:meth:`control` methods, respectively, while the updates section is implemented using the :py:attr:`updates` attribute.
+    The ``path`` arguments to these methods should always be tuples.
     Integer arguments can be presented as either integers or strings that can be parsed by ``int``; all other arguments must be strings.
 
     .. py:method:: get(path, filters=None, fields=None, order=None, limit=None, offset=None):
@@ -99,30 +100,16 @@ Within the buildmaster process, the root of the data API is available at `self.m
         Get the endpoint responsible for the given path, along with any arguments extracted from the path.
         This can be used by callers that need access to information from the endpoint beyond that returned from ``get``.
 
-    .. py:method:: startConsuming(callback, options, path)
-
-        :param callback: a function to call for each message
-        :param options: dictionary containing model-specific options
-        :param tuple path: A tuple of path elements representing the API path.
-            Numbers can be passed as strings or integers.
-        :returns: consumer via Deferred
-        :raises: :py:exc:`~buildbot.data.exceptions.InvalidPathError`
-
-        This method implements the subscriptions section.
-        The callback interface and consumer the same as those of :py:meth:`~buildbot.mq.connector.MQConnector.startConsuming`.
-        The ``path`` argument is automatically translated into an appropriate topic.
-
     .. py:method:: produceEvent(rtype, msg, event)
 
         :param rtype: the name identifying a resource type
         :param msg: a dictionary describing the msg to send
         :param event: the event to produce
 
-        This method implements the production of an event, for the rtype identified by its name string
-        Usually, this is the role of the data layer to produce the events inside the update methods
-        For the potencial use cases where it would make sense to solely produce and event, and not update
-        data, please use this API, rather than directly call mq.
-        It ensures the event is sent to all the routingkeys specified by eventPathPatterns
+        This method implements the production of an event, for the rtype identified by its name string.
+        Usually, this is the role of the data layer to produce the events inside the update methods.
+        For the potential use cases where it would make sense to solely produce an event, and not update data, please use this API, rather than directly call mq.
+        It ensures the event is sent to all the routingkeys specified by eventPathPatterns.
 
     .. py:method:: control(action, args, path)
 
@@ -140,7 +127,8 @@ Within the buildmaster process, the root of the data API is available at `self.m
 
         :returns: list of endpoint specifications
 
-        This method returns the API spec as described in :ref:`API-Discovery`.
+        This method returns the deprecated API spec.
+        Please use :ref:`Raml-Spec` instead.
 
     .. py:attribute:: rtypes
 
@@ -165,7 +153,7 @@ Exceptions
 
 .. py:exception:: DataException
 
-    This is a base class for all other Data API exceptions
+    This is a base class for all other Data API exceptions.
 
 .. py:exception:: InvalidPathError
 
@@ -185,7 +173,7 @@ Web Interface
 The HTTP interface is implemented by the :py:mod:`buildbot.www` package, as configured by the user.
 Part of that configuration is a base URL, which is considered a prefix for all paths mentioned here.
 
-See :ref:`WWW` for more information.
+See :ref:`WWW-base-app` for more information.
 
 .. _Data Model:
 
@@ -204,19 +192,21 @@ Adding Resource Types
 You'll need to use both plural and singular forms of the resource type; in this example, we'll use 'pub' and 'pubs'.
 You can also follow an existing file, like :src:`master/buildbot/data/changes.py`, to see when to use which form.
 
-In :src:`master/buildbot/data/pubs.py`, create a subclass of :py:class:`ResourceType`::
+In ``master/buildbot/data/pubs.py``, create a subclass of :py:class:`ResourceType`::
 
     from buildbot.data import base
+
     class Pub(base.ResourceType):
         name = "pub"
         endpoints = []
-        keyFields = [ 'pubid' ]
+        keyFields = ['pubid']
 
         class EntityType(types.Entity):
             pubid = types.Integer()
             name = types.String()
             num_taps = types.Integer()
             closes_at = types.Integer()
+
         entityType = EntityType(name)
 
 .. py:class:: ResourceType
@@ -249,7 +239,7 @@ In :src:`master/buildbot/data/pubs.py`, create a subclass of :py:class:`Resource
 
         ``pub/:pubid``
 
-        In the example above, a call to ``produceEvent({ 'pubid' : 10, 'name' : 'Winchester' }, 'opened')`` would result in a message with routing key ``('pub', '10', 'opened')``.
+        In the example above, a call to ``produceEvent({'pubid': 10, 'name': 'Winchester'}, 'opened')`` would result in a message with routing key ``('pub', '10', 'opened')``.
 
         Several paths can be specified in order to be consistent with rest endpoints.
 
@@ -290,7 +280,7 @@ Adding Endpoints
 Each resource path is implemented as an :py:class:`~Endpoint` instance.
 In most cases, each instance is of a different class, but this is not required.
 
-The data connector's :py:meth:`~buildbot.data.connector.DataConnector.get`, :py:meth:`~buildbot.data.connector.DataConnector.startConsuming`, and :py:meth:`~buildbot.data.connector.DataConnector.control` methods all take a ``path`` argument that is used to look up the corresponding endpoint.
+The data connector's :py:meth:`~buildbot.data.connector.DataConnector.get` and :py:meth:`~buildbot.data.connector.DataConnector.control` methods both take a ``path`` argument that is used to look up the corresponding endpoint.
 The path matching is performed by :py:mod:`buildbot.util.pathmatch`, and supports automatically extracting variable fields from the path.
 See that module's description for details.
 
@@ -355,13 +345,6 @@ See that module's description for details.
 
         Any result spec configuration that remains on return will be applied automatically.
 
-    .. py:method:: startConsuming(callback, options, kwargs)
-
-        :param callback: a function to call for each message
-        :param options: dictionary containing model-specific options
-        :param kwargs: fields extracted from the path
-        :returns: consumer via Deferred
-
     .. py:method:: control(action, args, kwargs)
 
         :param action: a short string naming the action to perform
@@ -371,7 +354,8 @@ See that module's description for details.
 Continuing the pub example, a simple endpoint would look like this::
 
     class PubEndpoint(base.Endpoint):
-        pathPattern = ( 'pub', 'i:pubid' )
+        pathPattern = ('pub', 'i:pubid')
+
         def get(self, resultSpec, kwargs):
             return self.master.db.pubs.getPub(kwargs['pubid'])
 
@@ -404,7 +388,7 @@ Update methods are for use by the Buildbot process code, and as such are general
 They generally encapsulate logic common to multiple users (e.g., creating buildsets), and finish by performing modifications in the database and sending a corresponding message.
 In general, Buildbot does not depend on timing of either the database or message broker, so the order in which these operations are initiated is not important.
 
-Update methods are considered part of Buildbot's user-visible interface, and as such incompatible changes should be avoied wherever possible.
+Update methods are considered part of Buildbot's user-visible interface, and as such incompatible changes should be avoided wherever possible.
 Instead, either add a new method (and potentially re-implement existing methods in terms of the new method) or add new, optional parameters to an existing method.
 If an incompatible change is unavoidable, it should be described clearly in the release notes.
 
@@ -427,8 +411,8 @@ Returning to the pub example::
 
 Update methods should be documented in :src:`master/docs/developer/data.rst`.
 They should be thoroughly tested with unit tests.
-They should have a fake implentation in :src:`master/buildbot/test/fake/fakedata.py`.
-That fake implementation should be tested to match the real implementation in :src:`master/buildbot/test/interfaces/test_data_connector.py`.
+They should have a fake implementation in :src:`master/buildbot/test/fake/fakedata.py`.
+That fake implementation should be tested to match the real implementation in :src:`master/buildbot/test/unit/test_data_connector.py`.
 
 .. _Adding-Fields-to-Resource-Types:
 
@@ -451,33 +435,43 @@ Basic Types
 
 .. py:class:: Integer()
 
-    An integer. ::
+    An integer.
+
+    ::
 
         myid = types.Integer()
 
 .. py:class:: String()
 
     A string.
-    Strings must always be Unicode. ::
+    Strings must always be Unicode.
+
+    ::
 
         name = types.String()
 
 .. py:class:: Binary()
 
-    A binary bytestring. ::
+    A binary bytestring.
+
+    ::
 
         data = types.Binary()
 
 .. py:class:: Boolean()
 
-    A boolean value. ::
+    A boolean value.
+
+    ::
 
         complete = types.Boolean()
 
 .. py:class:: Identifier(length)
 
     An identifier; see :ref:`Identifier <type-identifier>`.
-    The constructor argument specifies the maximum length. ::
+    The constructor argument specifies the maximum length.
+
+    ::
 
         ident = types.Identifier(25)
 
@@ -486,21 +480,27 @@ Compound Types
 
 .. py:class:: NoneOk(nestedType)
 
-    Either the nested type, or None. ::
+    Either the nested type, or None.
+
+    ::
 
         category = types.NoneOk(types.String())
 
 .. py:class:: List(of)
 
     An list of objects.
-    The named constructor argument ``of`` specifies the type of the list elements. ::
+    The named constructor argument ``of`` specifies the type of the list elements.
+
+    ::
 
         tags = types.List(of=types.String())
 
 .. py:class:: SourcedProperties()
 
     A data structure representing properties with their sources, in the form ``{name: (value, source)}``.
-    The property name and source must be Unicode, and the value must be JSON-able. ::
+    The property name and source must be Unicode, and the value must be JSON-able.
+
+    ::
 
         props = types.SourcedProperties()
 
@@ -525,7 +525,7 @@ Entity Type
                 tags = types.List(of=types.String())
                 props = types.SourcedProperties()
 
-    Then instantiate the class with the resource type name ::
+    Then instantiate the class with the resource type name::
 
         entityType = EntityType(name)
 
@@ -542,12 +542,12 @@ The data api enforces a strong and well-defined model on Buildbot's data.
 This model is influenced by REST, in the sense that it defines resources, representations for resources, and identifiers for resources.
 For each resource type, the API specifies
 
- * the attributes of the resource and their types (e.g., changes have a string specifying their project);
- * the format of links to other resources (e.g., buildsets to sourcestamp sets);
- * the paths relating to the resource type;
- * the format of routing keys for messages relating to the resource type;
- * the events that can occur on that resource (e.g., a buildrequest can be claimed); and
- * options and filters for getting resources.
+* the attributes of the resource and their types (e.g., changes have a string specifying their project);
+* the format of links to other resources (e.g., buildsets to sourcestamp sets);
+* the paths relating to the resource type;
+* the format of routing keys for messages relating to the resource type;
+* the events that can occur on that resource (e.g., a buildrequest can be claimed); and
+* options and filters for getting resources.
 
 Some resource type attributes only appear in certain formats, as noted in the documentation for the resource types.
 In general, messages do not include any optional attributes, nor links.
@@ -557,25 +557,3 @@ Similarly, message routing keys given here are separated by dots, with key names
 The translation to tuples and other formats should be obvious.
 
 All strings in the data model are unicode strings.
-
-.. toctree::
-    :maxdepth: 1
-
-    rtype-buildset
-    rtype-change
-    rtype-changesource
-    rtype-master
-    rtype-builder
-    rtype-buildslave
-    rtype-sourcestamp
-    rtype-patch
-    rtype-properties
-    rtype-scheduler
-    rtype-forcescheduler
-    rtype-build
-    rtype-buildrequest
-    rtype-step
-    rtype-log
-    rtype-logchunk
-
-.. [#apiv1] The JSON API defined by ``status_json.py`` in Buildbot-0.8.x is considered version 1, although its root path was ``json``, not ``api/v1``.

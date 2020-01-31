@@ -13,9 +13,10 @@
 #
 # Copyright Buildbot Team Members
 
+from twisted.trial import unittest
+
 from buildbot.test.util import tuplematching
 from buildbot.util import tuplematch
-from twisted.trial import unittest
 
 
 class MatchTuple(tuplematching.TupleMatchingMixin, unittest.TestCase):

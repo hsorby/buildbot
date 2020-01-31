@@ -13,15 +13,17 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot import interfaces
-from buildbot.util.eventual import eventually
+
 from twisted.internet import defer
 from twisted.python import log
-from zope.interface import implements
+from zope.interface import implementer
+
+from buildbot import interfaces
+from buildbot.util.eventual import eventually
 
 
+@implementer(interfaces.IBuildRequestStatus)
 class BuildRequestStatus:
-    implements(interfaces.IBuildRequestStatus)
 
     def __init__(self, buildername, brid, status, brdict=None):
         self.buildername = buildername
@@ -46,8 +48,7 @@ class BuildRequestStatus:
 
         # this is only set once, so no need to lock if we already have it
         if self._buildrequest:
-            defer.returnValue(self._buildrequest)
-            return
+            return self._buildrequest
 
         yield self._buildrequest_lock.acquire()
 
@@ -66,7 +67,7 @@ class BuildRequestStatus:
 
         self._buildrequest_lock.release()
 
-        defer.returnValue(self._buildrequest)
+        return self._buildrequest
 
     def buildStarted(self, build):
         self.status._buildrequest_buildStarted(build.status)
@@ -76,12 +77,12 @@ class BuildRequestStatus:
     @defer.inlineCallbacks
     def getBsid(self):
         br = yield self._getBuildRequest()
-        defer.returnValue(br.bsid)
+        return br.bsid
 
     @defer.inlineCallbacks
     def getBuildProperties(self):
         br = yield self._getBuildRequest()
-        defer.returnValue(br.properties)
+        return br.properties
 
     def getSourceStamp(self):
         # TODO..
@@ -103,15 +104,15 @@ class BuildRequestStatus:
             bs = builder.getBuild(buildnum)
             if bs:
                 builds.append(bs)
-        defer.returnValue(builds)
+        return builds
 
     def subscribe(self, observer):
         d = self.getBuilds()
 
+        @d.addCallback
         def notify_old(oldbuilds):
             for bs in oldbuilds:
                 eventually(observer, bs)
-        d.addCallback(notify_old)
         d.addCallback(lambda _:
                       self.status._buildrequest_subscribe(self.brid, observer))
         d.addErrback(log.err, 'while notifying subscribers')
@@ -122,14 +123,14 @@ class BuildRequestStatus:
     @defer.inlineCallbacks
     def getSubmitTime(self):
         br = yield self._getBuildRequest()
-        defer.returnValue(br.submittedAt)
+        return br.submittedAt
 
     def asDict(self):
         result = {}
         # Constant
         result['source'] = None  # not available sync, sorry
         result['builderName'] = self.buildername
-        result['submittedAt'] = None  # not availably sync, sorry
+        result['submittedAt'] = None  # not available sync, sorry
 
         # Transient
         result['builds'] = []  # not available async, sorry
@@ -149,4 +150,4 @@ class BuildRequestStatus:
         builds = yield self.getBuilds()
         result['builds'] = [build.asDict() for build in builds]
 
-        defer.returnValue(result)
+        return result

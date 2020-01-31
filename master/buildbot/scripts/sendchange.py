@@ -13,12 +13,14 @@
 #
 # Copyright Buildbot Team Members
 
+
 import sys
 import traceback
 
+from twisted.internet import defer
+
 from buildbot.clients import sendchange as sendchange_client
 from buildbot.util import in_reactor
-from twisted.internet import defer
 
 
 @in_reactor
@@ -48,9 +50,9 @@ def sendchange(config):
                      repository=repository, vc=vc, project=project, revlink=revlink,
                      codebase=codebase)
     except Exception:
-        print "change not sent:"
+        print("change not sent:")
         traceback.print_exc(file=sys.stdout)
-        defer.returnValue(1)
+        return 1
     else:
-        print "change sent successfully"
-        defer.returnValue(0)
+        print("change sent successfully")
+        return 0

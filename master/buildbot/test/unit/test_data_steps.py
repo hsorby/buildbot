@@ -13,15 +13,17 @@
 #
 # Copyright Buildbot Team Members
 
+
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot.data import steps
 from buildbot.test.fake import fakedb
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import endpoint
 from buildbot.test.util import interfaces
+from buildbot.test.util.misc import TestReactorMixin
 from buildbot.util import epoch2datetime
-from twisted.internet import defer
-from twisted.internet import reactor
-from twisted.trial import unittest
 
 TIME1 = 2001111
 TIME2 = 2002222
@@ -36,13 +38,13 @@ class StepEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def setUp(self):
         self.setUpEndpoint()
         self.db.insertTestData([
-            fakedb.Buildslave(id=47, name='linux'),
-            fakedb.Builder(id=77),
+            fakedb.Worker(id=47, name='linux'),
+            fakedb.Builder(id=77, name='builder77'),
             fakedb.Master(id=88),
             fakedb.Buildset(id=8822),
             fakedb.BuildRequest(id=82, buildsetid=8822),
             fakedb.Build(id=30, builderid=77, number=7, masterid=88,
-                         buildrequestid=82, buildslaveid=47),
+                         buildrequestid=82, workerid=47),
             fakedb.Step(id=70, number=0, name='one', buildid=30,
                         started_at=TIME1, complete_at=TIME2, results=0),
             fakedb.Step(id=71, number=1, name='two', buildid=30,
@@ -63,11 +65,11 @@ class StepEndpoint(endpoint.EndpointMixin, unittest.TestCase):
             'buildid': 30,
             'complete': False,
             'complete_at': None,
-            'name': u'three',
+            'name': 'three',
             'number': 2,
             'results': None,
             'started_at': epoch2datetime(TIME3),
-            'state_string': u'',
+            'state_string': '',
             'stepid': 72,
             'urls': [],
             'hidden': True})
@@ -91,10 +93,21 @@ class StepEndpoint(endpoint.EndpointMixin, unittest.TestCase):
         self.assertEqual(step['stepid'], 71)
 
     @defer.inlineCallbacks
+    def test_get_existing_buildername_name(self):
+        step = yield self.callGet(('builders', 'builder77', 'builds', 7, 'steps', 'two'))
+        self.validateData(step)
+        self.assertEqual(step['stepid'], 71)
+
+    @defer.inlineCallbacks
     def test_get_existing_builder_number(self):
         step = yield self.callGet(('builders', 77, 'builds', 7, 'steps', 1))
         self.validateData(step)
         self.assertEqual(step['stepid'], 71)
+
+    @defer.inlineCallbacks
+    def test_get_missing_buildername_builder_number(self):
+        step = yield self.callGet(('builders', 'builder77_nope', 'builds', 7, 'steps', 1))
+        self.assertEqual(step, None)
 
     @defer.inlineCallbacks
     def test_get_missing(self):
@@ -110,15 +123,15 @@ class StepsEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def setUp(self):
         self.setUpEndpoint()
         self.db.insertTestData([
-            fakedb.Buildslave(id=47, name='linux'),
-            fakedb.Builder(id=77),
+            fakedb.Worker(id=47, name='linux'),
+            fakedb.Builder(id=77, name='builder77'),
             fakedb.Master(id=88),
             fakedb.Buildset(id=8822),
             fakedb.BuildRequest(id=82, buildsetid=8822),
             fakedb.Build(id=30, builderid=77, number=7, masterid=88,
-                         buildrequestid=82, buildslaveid=47),
+                         buildrequestid=82, workerid=47),
             fakedb.Build(id=31, builderid=77, number=8, masterid=88,
-                         buildrequestid=82, buildslaveid=47),
+                         buildrequestid=82, workerid=47),
             fakedb.Step(id=70, number=0, name='one', buildid=30,
                         started_at=TIME1, complete_at=TIME2, results=0),
             fakedb.Step(id=71, number=1, name='two', buildid=30,
@@ -145,25 +158,32 @@ class StepsEndpoint(endpoint.EndpointMixin, unittest.TestCase):
         [self.validateData(step) for step in steps]
         self.assertEqual([s['number'] for s in steps], [0, 1, 2])
 
+    @defer.inlineCallbacks
+    def test_get_buildername(self):
+        steps = yield self.callGet(('builders', 'builder77', 'builds', 7, 'steps'))
+        [self.validateData(step) for step in steps]
+        self.assertEqual([s['number'] for s in steps], [0, 1, 2])
 
-class Step(interfaces.InterfaceTests, unittest.TestCase):
+
+class Step(TestReactorMixin, interfaces.InterfaceTests, unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self,
-                                             wantMq=True, wantDb=True, wantData=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=True, wantDb=True,
+                                             wantData=True)
         self.rtype = steps.Step(self.master)
 
     def test_signature_newStep(self):
         @self.assertArgSpecMatches(
-            self.master.data.updates.newStep,  # fake
-            self.rtype.newStep)  # real
+            self.master.data.updates.addStep,  # fake
+            self.rtype.addStep)  # real
         def newStep(self, buildid, name):
             pass
 
     @defer.inlineCallbacks
     def test_newStep(self):
-        stepid, number, name = yield self.rtype.newStep(buildid=10,
-                                                        name=u'name')
+        stepid, number, name = yield self.rtype.addStep(buildid=10,
+                                                        name='name')
         msgBody = {
             'buildid': 10,
             'complete': False,
@@ -172,7 +192,7 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
             'number': number,
             'results': None,
             'started_at': None,
-            'state_string': u'pending',
+            'state_string': 'pending',
             'stepid': stepid,
             'urls': [],
             'hidden': False,
@@ -190,7 +210,7 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
             'number': number,
             'results': None,
             'started_at': None,
-            'state_string': u'pending',
+            'state_string': 'pending',
             'urls': [],
             'hidden': False,
         })
@@ -198,8 +218,8 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
     @defer.inlineCallbacks
     def test_fake_newStep(self):
         self.assertEqual(
-            len((yield self.master.data.updates.newStep(buildid=10,
-                                                        name=u'ten'))),
+            len((yield self.master.data.updates.addStep(buildid=10,
+                                                        name='ten'))),
             3)
 
     def test_signature_startStep(self):
@@ -211,20 +231,20 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_startStep(self):
-        self.patch(reactor, 'seconds', lambda: TIME1)
-        yield self.master.db.steps.addStep(buildid=10, name=u'ten',
-                                           state_string=u'pending')
+        self.reactor.advance(TIME1)
+        yield self.master.db.steps.addStep(buildid=10, name='ten',
+                                           state_string='pending')
         yield self.rtype.startStep(stepid=100)
 
         msgBody = {
             'buildid': 10,
             'complete': False,
             'complete_at': None,
-            'name': u'ten',
+            'name': 'ten',
             'number': 0,
             'results': None,
             'started_at': epoch2datetime(TIME1),
-            'state_string': u'pending',
+            'state_string': 'pending',
             'stepid': 100,
             'urls': [],
             'hidden': False,
@@ -238,11 +258,11 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
             'buildid': 10,
             'complete_at': None,
             'id': 100,
-            'name': u'ten',
+            'name': 'ten',
             'number': 0,
             'results': None,
             'started_at': epoch2datetime(TIME1),
-            'state_string': u'pending',
+            'state_string': 'pending',
             'urls': [],
             'hidden': False,
         })
@@ -256,19 +276,19 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_setStepStateString(self):
-        yield self.master.db.steps.addStep(buildid=10, name=u'ten',
-                                           state_string=u'pending')
-        yield self.rtype.setStepStateString(stepid=100, state_string=u'hi')
+        yield self.master.db.steps.addStep(buildid=10, name='ten',
+                                           state_string='pending')
+        yield self.rtype.setStepStateString(stepid=100, state_string='hi')
 
         msgBody = {
             'buildid': 10,
             'complete': False,
             'complete_at': None,
-            'name': u'ten',
+            'name': 'ten',
             'number': 0,
             'results': None,
             'started_at': None,
-            'state_string': u'hi',
+            'state_string': 'hi',
             'stepid': 100,
             'urls': [],
             'hidden': False,
@@ -282,11 +302,11 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
             'buildid': 10,
             'complete_at': None,
             'id': 100,
-            'name': u'ten',
+            'name': 'ten',
             'number': 0,
             'results': None,
             'started_at': None,
-            'state_string': u'hi',
+            'state_string': 'hi',
             'urls': [],
             'hidden': False,
         })
@@ -300,11 +320,11 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_finishStep(self):
-        yield self.master.db.steps.addStep(buildid=10, name=u'ten',
-                                           state_string=u'pending')
-        self.patch(reactor, 'seconds', lambda: TIME1)
+        yield self.master.db.steps.addStep(buildid=10, name='ten',
+                                           state_string='pending')
+        self.reactor.advance(TIME1)
         yield self.rtype.startStep(stepid=100)
-        self.patch(reactor, 'seconds', lambda: TIME2)
+        self.reactor.advance(TIME2 - TIME1)
         self.master.mq.clearProductions()
         yield self.rtype.finishStep(stepid=100, results=9, hidden=False)
 
@@ -312,11 +332,11 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
             'buildid': 10,
             'complete': True,
             'complete_at': epoch2datetime(TIME2),
-            'name': u'ten',
+            'name': 'ten',
             'number': 0,
             'results': 9,
             'started_at': epoch2datetime(TIME1),
-            'state_string': u'pending',
+            'state_string': 'pending',
             'stepid': 100,
             'urls': [],
             'hidden': False,
@@ -330,11 +350,11 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
             'buildid': 10,
             'complete_at': epoch2datetime(TIME2),
             'id': 100,
-            'name': u'ten',
+            'name': 'ten',
             'number': 0,
             'results': 9,
             'started_at': epoch2datetime(TIME1),
-            'state_string': u'pending',
+            'state_string': 'pending',
             'urls': [],
             'hidden': False,
         })
@@ -348,21 +368,21 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_addStepURL(self):
-        yield self.master.db.steps.addStep(buildid=10, name=u'ten',
-                                           state_string=u'pending')
-        yield self.rtype.addStepURL(stepid=100, name=u"foo", url=u"bar")
+        yield self.master.db.steps.addStep(buildid=10, name='ten',
+                                           state_string='pending')
+        yield self.rtype.addStepURL(stepid=100, name="foo", url="bar")
 
         msgBody = {
             'buildid': 10,
             'complete': False,
             'complete_at': None,
-            'name': u'ten',
+            'name': 'ten',
             'number': 0,
             'results': None,
             'started_at': None,
-            'state_string': u'pending',
+            'state_string': 'pending',
             'stepid': 100,
-            'urls': [{u'name': u'foo', u'url': u'bar'}],
+            'urls': [{'name': 'foo', 'url': 'bar'}],
             'hidden': False,
         }
         self.master.mq.assertProductions([
@@ -374,11 +394,11 @@ class Step(interfaces.InterfaceTests, unittest.TestCase):
             'buildid': 10,
             'complete_at': None,
             'id': 100,
-            'name': u'ten',
+            'name': 'ten',
             'number': 0,
             'results': None,
             'started_at': None,
-            'state_string': u'pending',
-            'urls': [{u'name': u'foo', u'url': u'bar'}],
+            'state_string': 'pending',
+            'urls': [{'name': 'foo', 'url': 'bar'}],
             'hidden': False,
         })

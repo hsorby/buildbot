@@ -13,8 +13,8 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.www.plugin import Application
 from buildbot.schedulers.forcesched import TextParameter
+from buildbot.www.plugin import Application
 
 
 class CodeParameter(TextParameter):
@@ -24,6 +24,7 @@ class CodeParameter(TextParameter):
     type = "code"
     mode = "text"
     height = 200
+
 
 # create the interface for the setuptools entry point
 ep = Application(__name__, "Buildbot forcescheduler parameter using ace.js to submit code")

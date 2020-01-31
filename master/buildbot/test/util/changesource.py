@@ -13,12 +13,14 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.test.fake import fakemaster
+
 from twisted.internet import defer
 from twisted.internet import task
 
+from buildbot.test.fake import fakemaster
 
-class ChangeSourceMixin(object):
+
+class ChangeSourceMixin:
 
     """
     This class is used for testing change sources, and handles a few things:
@@ -36,24 +38,33 @@ class ChangeSourceMixin(object):
 
     def setUpChangeSource(self):
         "Set up the mixin - returns a deferred."
-        self.master = fakemaster.make_master(wantDb=True, wantData=True,
-                                             testcase=self)
+        self.master = fakemaster.make_master(self, wantDb=True, wantData=True)
         assert not hasattr(self.master, 'addChange')  # just checking..
         return defer.succeed(None)
 
+    @defer.inlineCallbacks
     def tearDownChangeSource(self):
         "Tear down the mixin - returns a deferred."
         if not self.started:
-            return defer.succeed(None)
+            return
         if self.changesource.running:
-            return defer.maybeDeferred(self.changesource.stopService)
-        return defer.succeed(None)
+            yield defer.maybeDeferred(self.changesource.stopService)
+        yield self.changesource.disownServiceParent()
+        return
 
     def attachChangeSource(self, cs):
         "Set up a change source for testing; sets its .master attribute"
         self.changesource = cs
-        self.changesource.master = self.master
+        # FIXME some changesource does not have master property yet but
+        # mailchangesource has :-/
+        try:
+            self.changesource.master = self.master
+        except AttributeError:
+            self.changesource.setServiceParent(self.master)
 
+        # configure the service to let secret manager render the secrets
+        d = self.changesource.configureService()
+        d.addErrback(lambda _: None)
         # also, now that changesources are ClusteredServices, setting up
         # the clock here helps in the unit tests that check that behavior
         self.changesource.clock = task.Clock()
@@ -61,27 +72,29 @@ class ChangeSourceMixin(object):
     def startChangeSource(self):
         "start the change source as a service"
         self.started = True
-        self.changesource.startService()
+        return self.changesource.startService()
 
+    @defer.inlineCallbacks
     def stopChangeSource(self):
         "stop the change source again; returns a deferred"
-        d = self.changesource.stopService()
+        yield self.changesource.stopService()
 
-        def mark_stopped(_):
-            self.started = False
-        d.addCallback(mark_stopped)
-        return d
+        self.started = False
 
     def setChangeSourceToMaster(self, otherMaster):
         # some tests build the CS late, so for those tests we will require that
-        # they use the default name in order to run tests that require master assignments
+        # they use the default name in order to run tests that require master
+        # assignments
         if self.changesource is not None:
             name = self.changesource.name
         else:
             name = self.DEFAULT_NAME
 
-        self.master.data.updates.changesourceIds[name] = self.DUMMY_CHANGESOURCE_ID
+        self.master.data.updates.changesourceIds[
+            name] = self.DUMMY_CHANGESOURCE_ID
         if otherMaster:
-            self.master.data.updates.changesourceMasters[self.DUMMY_CHANGESOURCE_ID] = otherMaster
+            self.master.data.updates.changesourceMasters[
+                self.DUMMY_CHANGESOURCE_ID] = otherMaster
         else:
-            del self.master.data.updates.changesourceMasters[self.DUMMY_CHANGESOURCE_ID]
+            del self.master.data.updates.changesourceMasters[
+                self.DUMMY_CHANGESOURCE_ID]

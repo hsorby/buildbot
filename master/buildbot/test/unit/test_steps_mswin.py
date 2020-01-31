@@ -13,25 +13,30 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.status.results import EXCEPTION
-from buildbot.status.results import FAILURE
-from buildbot.status.results import Results
-from buildbot.status.results import SUCCESS
-from buildbot.status.results import WARNINGS
-from buildbot.steps import mswin
-from buildbot.test.fake.remotecommand import ExpectShell
-from buildbot.test.util import steps
+
 from twisted.internet import defer
 from twisted.trial import unittest
 
+from buildbot.process.results import EXCEPTION
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
+from buildbot.process.results import WARNINGS
+from buildbot.process.results import Results
+from buildbot.steps import mswin
+from buildbot.test.fake.remotecommand import ExpectShell
+from buildbot.test.util import steps
+from buildbot.test.util.misc import TestReactorMixin
 
-class TestRobocopySimple(steps.BuildStepMixin, unittest.TestCase):
+
+class TestRobocopySimple(steps.BuildStepMixin, TestReactorMixin,
+                         unittest.TestCase):
 
     """
     Test L{Robocopy} command building.
     """
 
     def setUp(self):
+        self.setUpTestReactor()
         return self.setUpBuildStep()
 
     def tearDown(self):
@@ -50,9 +55,8 @@ class TestRobocopySimple(steps.BuildStepMixin, unittest.TestCase):
             ExpectShell(
                 workdir='wkdir',
                 command=command,
-                usePTY="slave-config"
-            )
-            + expected_code
+            ) +
+            expected_code
         )
         state_string = "'robocopy %s ...'" % source
         if expected_res != SUCCESS:
@@ -106,6 +110,18 @@ class TestRobocopySimple(steps.BuildStepMixin, unittest.TestCase):
             r'D:\source', r'E:\dest', files=['blah*'],
             exclude_dirs=['foo', 'bar'],
             expected_args=['blah*', '/XD', 'foo', 'bar']
+        )
+
+    def test_custom_opts(self):
+        return self._run_simple_test(
+            r'D:\source', r'E:\dest', files=['*.foo'], custom_opts=['/R:10', '/W:60'],
+            expected_args=['*.foo', '/R:10', '/W:60']
+        )
+
+    def test_verbose_output(self):
+        return self._run_simple_test(
+            r'D:\source', r'E:\dest', files=['*.foo'], verbose=True,
+            expected_args=['*.foo', '/V', '/TS', '/FP']
         )
 
     @defer.inlineCallbacks

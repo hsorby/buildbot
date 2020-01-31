@@ -13,19 +13,23 @@
 #
 # Copyright Buildbot Team Members
 
-import mock
 import os
+
+import mock
+
+from twisted.internet import defer
+from twisted.trial import unittest
 
 from buildbot import config
 from buildbot.db import connector
 from buildbot.db import exceptions
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import db
-from twisted.internet import defer
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
-class DBConnector(db.RealDatabaseMixin, unittest.TestCase):
+class TestDBConnector(TestReactorMixin, db.RealDatabaseMixin,
+                      unittest.TestCase):
 
     """
     Basic tests of the DBConnector class - all start with an empty DB
@@ -33,15 +37,17 @@ class DBConnector(db.RealDatabaseMixin, unittest.TestCase):
 
     @defer.inlineCallbacks
     def setUp(self):
+        self.setUpTestReactor()
         yield self.setUpRealDatabase(table_names=[
             'changes', 'change_properties', 'change_files', 'patches',
             'sourcestamps', 'buildset_properties', 'buildsets',
-            'sourcestampsets'])
+            'sourcestampsets', 'builds', 'builders', 'masters',
+            'buildrequests', 'workers'])
 
-        self.master = fakemaster.make_master()
+        self.master = fakemaster.make_master(self)
         self.master.config = config.MasterConfig()
-        self.db = connector.DBConnector(self.master,
-                                        os.path.abspath('basedir'))
+        self.db = connector.DBConnector(os.path.abspath('basedir'))
+        yield self.db.setServiceParent(self.master)
 
     @defer.inlineCallbacks
     def tearDown(self):
@@ -58,12 +64,11 @@ class DBConnector(db.RealDatabaseMixin, unittest.TestCase):
         yield self.db.reconfigServiceWithBuildbotConfig(self.master.config)
 
     # tests
+    @defer.inlineCallbacks
     def test_doCleanup_service(self):
-        d = self.startService()
+        yield self.startService()
 
-        @d.addCallback
-        def check(_):
-            self.assertTrue(self.db.cleanup_timer.running)
+        self.assertTrue(self.db.cleanup_timer.running)
 
     def test_doCleanup_unconfigured(self):
         self.db.changes.pruneChanges = mock.Mock(
@@ -71,18 +76,19 @@ class DBConnector(db.RealDatabaseMixin, unittest.TestCase):
         self.db._doCleanup()
         self.assertFalse(self.db.changes.pruneChanges.called)
 
+    @defer.inlineCallbacks
     def test_doCleanup_configured(self):
         self.db.changes.pruneChanges = mock.Mock(
             return_value=defer.succeed(None))
-        d = self.startService()
+        yield self.startService()
 
-        @d.addCallback
-        def check(_):
-            self.db._doCleanup()
-            self.assertTrue(self.db.changes.pruneChanges.called)
-        return d
+        self.db._doCleanup()
+        self.assertTrue(self.db.changes.pruneChanges.called)
 
     def test_setup_check_version_bad(self):
+        if self.db_url == 'sqlite://':
+            raise unittest.SkipTest(
+                'sqlite in-memory model is always upgraded at connection')
         d = self.startService(check_version=True)
         return self.assertFailure(d, exceptions.DatabaseNotReadyError)
 

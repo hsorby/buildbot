@@ -13,13 +13,16 @@
 #
 # Copyright Buildbot Team Members
 
+
 import mock
+
+from twisted.internet import defer
+from twisted.trial import unittest
 
 from buildbot.process import log
 from buildbot.process import logobserver
 from buildbot.test.fake import fakemaster
-from twisted.internet import defer
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
 class MyLogObserver(logobserver.LogObserver):
@@ -40,24 +43,25 @@ class MyLogObserver(logobserver.LogObserver):
         self.obs.append(('fin',))
 
 
-class TestLogObserver(unittest.TestCase):
+class TestLogObserver(TestReactorMixin, unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self, wantData=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantData=True)
 
     @defer.inlineCallbacks
     def test_sequence(self):
-        logid = yield self.master.data.updates.newLog(1, u'mine', u's')
-        l = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
+        logid = yield self.master.data.updates.addLog(1, 'mine', 's')
+        _log = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
         lo = MyLogObserver()
-        lo.setLog(l)
+        lo.setLog(_log)
 
-        yield l.addStdout(u'hello\n')
-        yield l.addStderr(u'cruel\n')
-        yield l.addStdout(u'world\n')
-        yield l.addStdout(u'multi\nline\nchunk\n')
-        yield l.addHeader(u'HDR\n')
-        yield l.finish()
+        yield _log.addStdout('hello\n')
+        yield _log.addStderr('cruel\n')
+        yield _log.addStdout('world\n')
+        yield _log.addStdout('multi\nline\nchunk\n')
+        yield _log.addHeader('HDR\n')
+        yield _log.finish()
 
         self.assertEqual(lo.obs, [
             ('out', 'hello\n'),
@@ -72,7 +76,7 @@ class TestLogObserver(unittest.TestCase):
 class MyLogLineObserver(logobserver.LogLineObserver):
 
     def __init__(self):
-        logobserver.LogLineObserver.__init__(self)
+        super().__init__()
         self.obs = []
 
     def outLineReceived(self, data):
@@ -88,23 +92,24 @@ class MyLogLineObserver(logobserver.LogLineObserver):
         self.obs.append(('fin',))
 
 
-class TestLineConsumerLogObesrver(unittest.TestCase):
+class TestLineConsumerLogObesrver(TestReactorMixin, unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self, wantData=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantData=True)
 
     @defer.inlineCallbacks
     def do_test_sequence(self, consumer):
-        logid = yield self.master.data.updates.newLog(1, u'mine', u's')
-        l = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
+        logid = yield self.master.data.updates.addLog(1, 'mine', 's')
+        _log = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
         lo = logobserver.LineConsumerLogObserver(consumer)
-        lo.setLog(l)
+        lo.setLog(_log)
 
-        yield l.addStdout(u'hello\n')
-        yield l.addStderr(u'cruel\n')
-        yield l.addStdout(u'multi\nline\nchunk\n')
-        yield l.addHeader(u'H1\nH2\n')
-        yield l.finish()
+        yield _log.addStdout('hello\n')
+        yield _log.addStderr('cruel\n')
+        yield _log.addStdout('multi\nline\nchunk\n')
+        yield _log.addHeader('H1\nH2\n')
+        yield _log.finish()
 
     @defer.inlineCallbacks
     def test_sequence_finish(self):
@@ -121,13 +126,13 @@ class TestLineConsumerLogObesrver(unittest.TestCase):
         yield self.do_test_sequence(consumer)
 
         self.assertEqual(results, [
-            ('o', u'hello'),
-            ('e', u'cruel'),
-            ('o', u'multi'),
-            ('o', u'line'),
-            ('o', u'chunk'),
-            ('h', u'H1'),
-            ('h', u'H2'),
+            ('o', 'hello'),
+            ('e', 'cruel'),
+            ('o', 'multi'),
+            ('o', 'line'),
+            ('o', 'chunk'),
+            ('h', 'H1'),
+            ('h', 'H2'),
             'finish',
         ])
 
@@ -142,33 +147,34 @@ class TestLineConsumerLogObesrver(unittest.TestCase):
         yield self.do_test_sequence(consumer)
 
         self.assertEqual(results, [
-            ('o', u'hello'),
-            ('e', u'cruel'),
-            ('o', u'multi'),
-            ('o', u'line'),
-            ('o', u'chunk'),
-            ('h', u'H1'),
-            ('h', u'H2'),
+            ('o', 'hello'),
+            ('e', 'cruel'),
+            ('o', 'multi'),
+            ('o', 'line'),
+            ('o', 'chunk'),
+            ('h', 'H1'),
+            ('h', 'H2'),
         ])
 
 
-class TestLogLineObserver(unittest.TestCase):
+class TestLogLineObserver(TestReactorMixin, unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self, wantData=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantData=True)
 
     @defer.inlineCallbacks
     def test_sequence(self):
-        logid = yield self.master.data.updates.newLog(1, u'mine', u's')
-        l = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
+        logid = yield self.master.data.updates.addLog(1, 'mine', 's')
+        _log = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
         lo = MyLogLineObserver()
-        lo.setLog(l)
+        lo.setLog(_log)
 
-        yield l.addStdout(u'hello\n')
-        yield l.addStderr(u'cruel\n')
-        yield l.addStdout(u'multi\nline\nchunk\n')
-        yield l.addHeader(u'H1\nH2\n')
-        yield l.finish()
+        yield _log.addStdout('hello\n')
+        yield _log.addStderr('cruel\n')
+        yield _log.addStdout('multi\nline\nchunk\n')
+        yield _log.addHeader('H1\nH2\n')
+        yield _log.finish()
 
         self.assertEqual(lo.obs, [
             ('out', 'hello'),
@@ -182,58 +188,60 @@ class TestLogLineObserver(unittest.TestCase):
         ])
 
     def test_old_setMaxLineLength(self):
-        # this method is gone, but used to be documented, so it's stil
+        # this method is gone, but used to be documented, so it's still
         # callable.  Just don't fail.
         lo = MyLogLineObserver()
         lo.setMaxLineLength(120939403)
 
 
-class TestOutputProgressObserver(unittest.TestCase):
+class TestOutputProgressObserver(TestReactorMixin, unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self, wantData=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantData=True)
 
     @defer.inlineCallbacks
     def test_sequence(self):
-        logid = yield self.master.data.updates.newLog(1, u'mine', u's')
-        l = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
+        logid = yield self.master.data.updates.addLog(1, 'mine', 's')
+        _log = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
         lo = logobserver.OutputProgressObserver('stdio')
         step = mock.Mock()
         lo.setStep(step)
-        lo.setLog(l)
+        lo.setLog(_log)
 
-        yield l.addStdout(u'hello\n')
+        yield _log.addStdout('hello\n')
         step.setProgress.assert_called_with('stdio', 6)
-        yield l.finish()
+        yield _log.finish()
 
 
-class TestBufferObserver(unittest.TestCase):
+class TestBufferObserver(TestReactorMixin, unittest.TestCase):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self, wantData=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantData=True)
 
     @defer.inlineCallbacks
     def do_test_sequence(self, lo):
-        logid = yield self.master.data.updates.newLog(1, u'mine', u's')
-        l = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
-        lo.setLog(l)
+        logid = yield self.master.data.updates.addLog(1, 'mine', 's')
+        _log = log.Log.new(self.master, 'mine', 's', logid, 'utf-8')
+        lo.setLog(_log)
 
-        yield l.addStdout(u'hello\n')
-        yield l.addStderr(u'cruel\n')
-        yield l.addStdout(u'multi\nline\nchunk\n')
-        yield l.addHeader(u'H1\nH2\n')
-        yield l.finish()
+        yield _log.addStdout('hello\n')
+        yield _log.addStderr('cruel\n')
+        yield _log.addStdout('multi\nline\nchunk\n')
+        yield _log.addHeader('H1\nH2\n')
+        yield _log.finish()
 
     @defer.inlineCallbacks
     def test_stdout_only(self):
         lo = logobserver.BufferLogObserver(wantStdout=True, wantStderr=False)
         yield self.do_test_sequence(lo)
-        self.assertEqual(lo.getStdout(), u'hello\nmulti\nline\nchunk\n')
-        self.assertEqual(lo.getStderr(), u'')
+        self.assertEqual(lo.getStdout(), 'hello\nmulti\nline\nchunk\n')
+        self.assertEqual(lo.getStderr(), '')
 
     @defer.inlineCallbacks
     def test_both(self):
         lo = logobserver.BufferLogObserver(wantStdout=True, wantStderr=True)
         yield self.do_test_sequence(lo)
-        self.assertEqual(lo.getStdout(), u'hello\nmulti\nline\nchunk\n')
-        self.assertEqual(lo.getStderr(), u'cruel\n')
+        self.assertEqual(lo.getStdout(), 'hello\nmulti\nline\nchunk\n')
+        self.assertEqual(lo.getStderr(), 'cruel\n')

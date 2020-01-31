@@ -13,23 +13,30 @@
 #
 # Copyright Buildbot Team Members
 
-import os.path
+
+import os
 import weakref
+
+import mock
+
+from twisted.internet import defer
+from twisted.internet import reactor
+from zope.interface import implementer
 
 from buildbot import config
 from buildbot import interfaces
 from buildbot.status import build
-from buildbot.test.fake import bslavemanager
+from buildbot.test.fake import bworkermanager
 from buildbot.test.fake import fakedata
 from buildbot.test.fake import fakedb
 from buildbot.test.fake import fakemq
 from buildbot.test.fake import pbmanager
 from buildbot.test.fake.botmaster import FakeBotMaster
-from twisted.internet import defer
-from zope.interface import implements
+from buildbot.test.fake.machine import FakeMachineManager
+from buildbot.util import service
 
 
-class FakeCache(object):
+class FakeCache:
 
     """Emulate an L{AsyncLRUCache}, but without any real caching.  This
     I{does} do the weakref part, to catch un-weakref-able objects."""
@@ -41,28 +48,27 @@ class FakeCache(object):
     def get(self, key, **kwargs):
         d = self.miss_fn(key, **kwargs)
 
+        @d.addCallback
         def mkref(x):
             if x is not None:
                 weakref.ref(x)
             return x
-        d.addCallback(mkref)
         return d
 
     def put(self, key, val):
         pass
 
 
-class FakeCaches(object):
+class FakeCaches:
 
     def get_cache(self, name, miss_fn):
         return FakeCache(name, miss_fn)
 
 
-class FakeStatus(object):
+class FakeStatus(service.BuildbotService):
 
-    def __init__(self, master):
-        self.master = master
-        self.lastBuilderStatus = None
+    name = "status"
+    lastBuilderStatus = None
 
     def builderAdded(self, name, basedir, tags=None, description=None):
         bs = FakeBuilderStatus(self.master)
@@ -72,10 +78,10 @@ class FakeStatus(object):
     def getBuilderNames(self):
         return []
 
-    def getSlaveNames(self):
+    def getWorkerNames(self):
         return []
 
-    def slaveConnected(self, name):
+    def workerConnected(self, name):
         pass
 
     def build_started(self, brid, buildername, build_status):
@@ -87,14 +93,26 @@ class FakeStatus(object):
     def getURLForBuildrequest(self, buildrequestid):
         return "URLForBuildrequest/%d" % (buildrequestid,)
 
+    def subscribe(self, _):
+        pass
 
-class FakeBuilderStatus(object):
+    def getTitle(self):
+        return "myBuildbot"
 
-    implements(interfaces.IBuilderStatus)
+    def getURLForThing(self, _):
+        return "h://thing"
+
+    def getBuildbotURL(self):
+        return "h://bb.me"
+
+
+@implementer(interfaces.IBuilderStatus)
+class FakeBuilderStatus:
 
     def __init__(self, master=None, buildername="Builder"):
         if master:
             self.master = master
+            self.botmaster = master.botmaster
             self.basedir = os.path.join(master.basedir, 'bldr')
         self.lastBuildStatus = None
         self._tags = None
@@ -115,7 +133,7 @@ class FakeBuilderStatus(object):
     def matchesAnyTag(self, tags):
         return set(self._tags) & set(tags)
 
-    def setSlavenames(self, names):
+    def setWorkernames(self, names):
         pass
 
     def setCacheSize(self, size):
@@ -132,16 +150,13 @@ class FakeBuilderStatus(object):
     def buildStarted(self, builderStatus):
         pass
 
-    def addPointEvent(self, text):
-        pass
 
-
-class FakeLogRotation(object):
+class FakeLogRotation:
     rotateLength = 42
     maxRotatedFiles = 42
 
 
-class FakeMaster(object):
+class FakeMaster(service.MasterService):
 
     """
     Create a fake Master instance: a Mock with some convenience
@@ -150,20 +165,41 @@ class FakeMaster(object):
     - Non-caching implementation for C{self.caches}
     """
 
-    def __init__(self, master_id=fakedb.FakeBuildRequestsComponent.MASTER_ID):
+    def __init__(self, reactor,
+                 master_id=fakedb.FakeBuildRequestsComponent.MASTER_ID):
+        super().__init__()
         self._master_id = master_id
+        self.reactor = reactor
+        self.objectids = {}
         self.config = config.MasterConfig()
         self.caches = FakeCaches()
         self.pbmanager = pbmanager.FakePBManager()
+        self.initLock = defer.DeferredLock()
         self.basedir = 'basedir'
-        self.botmaster = FakeBotMaster(master=self)
-        self.botmaster.parent = self
-        self.status = FakeStatus(self)
-        self.status.master = self
+        self.botmaster = FakeBotMaster()
+        self.botmaster.setServiceParent(self)
+        self.status = FakeStatus()
+        self.status.setServiceParent(self)
         self.name = 'fake:/master'
         self.masterid = master_id
-        self.buildslaves = bslavemanager.FakeBuildslaveManager(self)
+        self.workers = bworkermanager.FakeWorkerManager()
+        self.workers.setServiceParent(self)
+        self.machine_manager = FakeMachineManager()
+        self.machine_manager.setServiceParent(self)
         self.log_rotation = FakeLogRotation()
+        self.db = mock.Mock()
+        self.next_objectid = 0
+        self.config_version = 0
+
+        def getObjectId(sched_name, class_name):
+            k = (sched_name, class_name)
+            try:
+                rv = self.objectids[k]
+            except KeyError:
+                rv = self.objectids[k] = self.next_objectid
+                self.next_objectid += 1
+            return defer.succeed(rv)
+        self.db.state.getObjectId = getObjectId
 
     def getObjectId(self):
         return defer.succeed(self._master_id)
@@ -171,21 +207,31 @@ class FakeMaster(object):
     def subscribeToBuildRequests(self, callback):
         pass
 
-
 # Leave this alias, in case we want to add more behavior later
-def make_master(wantMq=False, wantDb=False, wantData=False,
-                testcase=None, url=None, **kwargs):
-    master = FakeMaster(**kwargs)
+
+
+def make_master(testcase, wantMq=False, wantDb=False, wantData=False,
+                wantRealReactor=False, url=None, **kwargs):
+    if wantRealReactor:
+        _reactor = reactor
+    else:
+        assert testcase is not None, "need testcase for fake reactor"
+        # The test case must inherit from TestReactorMixin and setup it.
+        _reactor = testcase.reactor
+
+    master = FakeMaster(_reactor, **kwargs)
     if url:
         master.buildbotURL = url
     if wantData:
         wantMq = wantDb = True
     if wantMq:
         assert testcase is not None, "need testcase for wantMq"
-        master.mq = fakemq.FakeMQConnector(master, testcase)
+        master.mq = fakemq.FakeMQConnector(testcase)
+        master.mq.setServiceParent(master)
     if wantDb:
         assert testcase is not None, "need testcase for wantDb"
-        master.db = fakedb.FakeDBConnector(master, testcase)
+        master.db = fakedb.FakeDBConnector(testcase)
+        master.db.setServiceParent(master)
     if wantData:
         master.data = fakedata.FakeDataConnector(master, testcase)
     return master

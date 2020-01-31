@@ -15,8 +15,6 @@
 # Portions Copyright Dan Radez <dradez+buildbot@redhat.com>
 # Portions Copyright Steve 'Ashcrow' Milner <smilner+buildbot@redhat.com>
 
-from __future__ import with_statement
-
 import os
 
 from buildbot import config
@@ -31,6 +29,7 @@ class RpmBuild(ShellCommand):
     RpmBuild build step.
     """
 
+    renderables = ['dist']
     name = "rpmbuilder"
     haltOnFailure = 1
     flunkOnFailure = 1
@@ -45,7 +44,8 @@ class RpmBuild(ShellCommand):
                  sourcedir='`pwd`',
                  specdir='`pwd`',
                  srcrpmdir='`pwd`',
-                 dist='.el5',
+                 dist='.el6',
+                 define=None,
                  autoRelease=False,
                  vcsRevision=False,
                  **kwargs):
@@ -68,18 +68,29 @@ class RpmBuild(ShellCommand):
         @param srcrpmdir: define the _srcrpmdir rpm parameter
         @type dist: str
         @param dist: define the dist string.
+        @type define: dict
+        @param define: additional parameters to define
         @type autoRelease: boolean
         @param autoRelease: Use auto incrementing release numbers.
         @type vcsRevision: boolean
         @param vcsRevision: Use vcs version number as revision number.
         """
-        ShellCommand.__init__(self, **kwargs)
-        self.rpmbuild = (
+        super().__init__(**kwargs)
+
+        self.dist = dist
+
+        self.base_rpmbuild = (
             'rpmbuild --define "_topdir %s" --define "_builddir %s"'
             ' --define "_rpmdir %s" --define "_sourcedir %s"'
             ' --define "_specdir %s" --define "_srcrpmdir %s"'
-            ' --define "dist %s"' % (topdir, builddir, rpmdir, sourcedir,
-                                     specdir, srcrpmdir, dist))
+            % (topdir, builddir, rpmdir, sourcedir, specdir,
+               srcrpmdir))
+
+        if define is None:
+            define = {}
+        for k, v in define.items():
+            self.base_rpmbuild += " --define \"{} {}\"".format(k, v)
+
         self.specfile = specfile
         self.autoRelease = autoRelease
         self.vcsRevision = vcsRevision
@@ -91,6 +102,10 @@ class RpmBuild(ShellCommand):
             'stdio', logobserver.LineConsumerLogObserver(self.logConsumer))
 
     def start(self):
+
+        rpm_extras_dict = {}
+        rpm_extras_dict['dist'] = self.dist
+
         if self.autoRelease:
             relfile = '%s.release' % (
                 os.path.basename(self.specfile).split('.')[0])
@@ -99,7 +114,7 @@ class RpmBuild(ShellCommand):
                     rel = int(rfile.readline().strip())
             except (IOError, TypeError, ValueError):
                 rel = 0
-            self.rpmbuild = self.rpmbuild + ' --define "_release %s"' % rel
+            rpm_extras_dict['_release'] = rel
             with open(relfile, 'w') as rfile:
                 rfile.write(str(rel + 1))
 
@@ -107,16 +122,24 @@ class RpmBuild(ShellCommand):
             revision = self.getProperty('got_revision')
             # only do this in the case where there's a single codebase
             if revision and not isinstance(revision, dict):
-                self.rpmbuild = (self.rpmbuild + ' --define "_revision %s"' %
-                                 revision)
+                rpm_extras_dict['_revision'] = revision
 
-        self.rpmbuild = self.rpmbuild + ' -ba %s' % self.specfile
+        self.rpmbuild = self.base_rpmbuild
+
+        # The unit tests expect a certain order, so we sort the dict to keep
+        # format the same every time
+        for k, v in sorted(rpm_extras_dict.items()):
+            self.rpmbuild = '{0} --define "{1} {2}"'.format(
+                self.rpmbuild, k, v)
+
+        self.rpmbuild = '{0} -ba {1}'.format(self.rpmbuild, self.specfile)
 
         self.command = self.rpmbuild
 
         # create the actual RemoteShellCommand instance now
         kwargs = self.remote_kwargs
         kwargs['command'] = self.command
+        kwargs['workdir'] = self.workdir
         cmd = buildstep.RemoteShellCommand(**kwargs)
         self.setupEnvironment(cmd)
         self.startCommand(cmd)
@@ -143,6 +166,6 @@ class RpmBuild(ShellCommand):
                     break
 
     def createSummary(self, log):
-        self.addCompleteLog('RPM Command Log', "".join(self.rpmcmdlog))
+        self.addCompleteLog('RPM Command Log', "\n".join(self.rpmcmdlog))
         if self.rpmerrors:
-            self.addCompleteLog('RPM Errors', "".join(self.rpmerrors))
+            self.addCompleteLog('RPM Errors', "\n".join(self.rpmerrors))
