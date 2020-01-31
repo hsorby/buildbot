@@ -13,16 +13,15 @@
 #
 # Copyright Buildbot Team Members
 
-from __future__ import with_statement
-
 import os
+
+from twisted.trial import unittest
 
 from buildbot.scripts import restart
 from buildbot.scripts import start
 from buildbot.scripts import stop
 from buildbot.test.util import dirs
 from buildbot.test.util import misc
-from twisted.trial import unittest
 
 
 def mkconfig(**kwargs):

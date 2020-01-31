@@ -13,17 +13,19 @@
 #
 # Copyright Buildbot Team Members
 
+
 from twisted.internet import defer
 from twisted.python import log
-from zope.interface import implements
+from zope.interface import implementer
 
+from buildbot import config
 from buildbot.interfaces import IChangeSource
 from buildbot.util import service
 from buildbot.util.poll import method as poll_method
 
 
-class ChangeSource(service.ClusteredService):
-    implements(IChangeSource)
+@implementer(IChangeSource)
+class ChangeSource(service.ClusteredBuildbotService):
 
     def describe(self):
         pass
@@ -50,12 +52,27 @@ class ChangeSource(service.ClusteredService):
                                                                  None)
 
 
-class PollingChangeSource(ChangeSource):
+class ReconfigurablePollingChangeSource(ChangeSource):
+    pollInterval = None
+    pollAtLaunch = None
 
-    def __init__(self, name=None, pollInterval=60 * 10, pollAtLaunch=False):
-        ChangeSource.__init__(self, name)
-        self.pollInterval = pollInterval
+    def checkConfig(self, name=None, pollInterval=60 * 10, pollAtLaunch=False):
+        super().checkConfig(name=name)
+        if pollInterval < 0:
+            config.error("interval must be >= 0: {}".format(pollInterval))
+
+    @defer.inlineCallbacks
+    def reconfigService(self, name=None, pollInterval=60 * 10, pollAtLaunch=False):
+        self.pollInterval, prevPollInterval = pollInterval, self.pollInterval
         self.pollAtLaunch = pollAtLaunch
+        yield super().reconfigService(name=name)
+
+        # pollInterval change is the only value which makes sense to reconfigure check.
+        if prevPollInterval != pollInterval and self.doPoll.started:
+            yield self.doPoll.stop()
+            # As a implementation detail, poller will 'pollAtReconfigure' if poll interval changes
+            # and pollAtLaunch=True
+            yield self.doPoll.start(interval=self.pollInterval, now=self.pollAtLaunch)
 
     def poll(self):
         pass
@@ -74,3 +91,19 @@ class PollingChangeSource(ChangeSource):
 
     def deactivate(self):
         return self.doPoll.stop()
+
+
+class PollingChangeSource(ReconfigurablePollingChangeSource):
+    # Legacy code will be very painful to port to BuildbotService life cycle
+    # because the unit tests keep doing shortcuts for the Service life cycle (i.e by no calling startService)
+    # instead of porting everything at once, we make a class to support legacy
+
+    def checkConfig(self, name=None, pollInterval=60 * 10, pollAtLaunch=False, **kwargs):
+        super().checkConfig(name=name, pollInterval=60 * 10, pollAtLaunch=False)
+        self.pollInterval = pollInterval
+        self.pollAtLaunch = pollAtLaunch
+
+    def reconfigService(self, *args, **kwargs):
+        # BuildbotServiceManager will detect such exception and swap old service with new service,
+        # instead of just reconfiguring
+        raise NotImplementedError()

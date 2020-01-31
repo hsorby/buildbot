@@ -13,12 +13,14 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.test.fake import fakemaster
-from buildbot.test.util import scheduler
-from buildbot.util import codebase
-from buildbot.util import state
 from twisted.internet import defer
 from twisted.trial import unittest
+
+from buildbot.test.fake import fakemaster
+from buildbot.test.util import scheduler
+from buildbot.test.util.misc import TestReactorMixin
+from buildbot.util import codebase
+from buildbot.util import state
 
 
 class FakeObject(codebase.AbsoluteSourceStampsMixin, state.StateMixin):
@@ -30,13 +32,16 @@ class FakeObject(codebase.AbsoluteSourceStampsMixin, state.StateMixin):
         self.codebases = codebases
 
 
-class TestAbsoluteSourceStampsMixin(unittest.TestCase, scheduler.SchedulerMixin):
+class TestAbsoluteSourceStampsMixin(unittest.TestCase,
+                                    scheduler.SchedulerMixin,
+                                    TestReactorMixin):
 
     codebases = {'a': {'repository': '', 'branch': 'master'},
                  'b': {'repository': '', 'branch': 'master'}}
 
     def setUp(self):
-        self.master = fakemaster.make_master(wantDb=True, wantData=True, testcase=self)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantDb=True, wantData=True)
         self.db = self.master.db
         self.object = FakeObject(self.master, self.codebases)
 
@@ -50,10 +55,10 @@ class TestAbsoluteSourceStampsMixin(unittest.TestCase, scheduler.SchedulerMixin)
         cbd = yield self.object.getCodebaseDict('a')
         self.assertEqual(cbd, {'repository': '', 'branch': 'master'})
 
+    @defer.inlineCallbacks
     def test_getCodebaseDict_not_found(self):
         d = self.object.getCodebaseDict('c')
-        self.assertFailure(d, KeyError)
-        return d
+        yield self.assertFailure(d, KeyError)
 
     @defer.inlineCallbacks
     def test_getCodebaseDict_existing(self):

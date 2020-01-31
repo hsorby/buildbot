@@ -14,16 +14,16 @@
 # Copyright Buildbot Team Members
 
 
-from buildbot.util import service
-from zope.interface import implements
+from zope.interface import implementer
 
 from buildbot import pbutil
 from buildbot import util
 from buildbot.interfaces import IStatusReceiver
+from buildbot.util import service
 
 
+@implementer(IStatusReceiver)
 class StatusReceiverBase:
-    implements(IStatusReceiver)
 
     def requestSubmitted(self, request):
         pass
@@ -58,9 +58,6 @@ class StatusReceiverBase:
     def stepText2Changed(self, build, step, text2):
         pass
 
-    def stepETAUpdate(self, build, step, ETA, expectations):
-        pass
-
     def logStarted(self, build, step, log):
         pass
 
@@ -79,16 +76,16 @@ class StatusReceiverBase:
     def builderRemoved(self, builderName):
         pass
 
-    def slaveConnected(self, slaveName):
+    def workerConnected(self, workerName):
         pass
 
-    def slaveDisconnected(self, slaveName):
+    def workerDisconnected(self, workerName):
         pass
 
-    def slavePaused(self, name):
+    def workerPaused(self, name):
         pass
 
-    def slaveUnpaused(self, name):
+    def workerUnpaused(self, name):
         pass
 
     def checkConfig(self, otherStatusReceivers):
@@ -97,17 +94,17 @@ class StatusReceiverBase:
 
 class StatusReceiverMultiService(StatusReceiverBase, service.AsyncMultiService,
                                  util.ComparableMixin):
-
-    def __init__(self):
-        service.AsyncMultiService.__init__(self)
+    pass
 
 
 class StatusReceiverService(StatusReceiverBase, service.AsyncService,
                             util.ComparableMixin):
     pass
 
+
 StatusReceiver = StatusReceiverService
 
 
+@implementer(IStatusReceiver)
 class StatusReceiverPerspective(StatusReceiver, pbutil.NewCredPerspective):
-    implements(IStatusReceiver)
+    pass

@@ -16,15 +16,16 @@
 import os
 import pprint
 import re
-import types
 
-from buildbot.process.buildstep import BuildStep
-from buildbot.process.buildstep import FAILURE
-from buildbot.process.buildstep import SUCCESS
+from twisted.internet import defer
 from twisted.internet import error
 from twisted.internet import reactor
 from twisted.internet.protocol import ProcessProtocol
 from twisted.python import runtime
+
+from buildbot.process.buildstep import FAILURE
+from buildbot.process.buildstep import SUCCESS
+from buildbot.process.buildstep import BuildStep
 
 
 class MasterShellCommand(BuildStep):
@@ -38,20 +39,20 @@ class MasterShellCommand(BuildStep):
     description = 'Running'
     descriptionDone = 'Ran'
     descriptionSuffix = None
-    renderables = ['command', 'env', 'workdir']
+    renderables = ['command', 'env']
     haltOnFailure = True
     flunkOnFailure = True
 
-    def __init__(self, command,
-                 env=None, workdir=None, usePTY=0, interruptSignal="KILL",
-                 **kwargs):
-        BuildStep.__init__(self, **kwargs)
+    def __init__(self, command, **kwargs):
+        self.env = kwargs.pop('env', None)
+        self.usePTY = kwargs.pop('usePTY', 0)
+        self.interruptSignal = kwargs.pop('interruptSignal', 'KILL')
+        self.logEnviron = kwargs.pop('logEnviron', True)
+
+        super().__init__(**kwargs)
 
         self.command = command
-        self.env = env
-        self.workdir = workdir
-        self.usePTY = usePTY
-        self.interruptSignal = interruptSignal
+        self.masterWorkdir = self.workdir
 
     class LocalPP(ProcessProtocol):
 
@@ -66,18 +67,21 @@ class MasterShellCommand(BuildStep):
 
         def processEnded(self, status_object):
             if status_object.value.exitCode is not None:
-                self.step.stdio_log.addHeader("exit status %d\n" % status_object.value.exitCode)
+                self.step.stdio_log.addHeader(
+                    "exit status %d\n" % status_object.value.exitCode)
             if status_object.value.signal is not None:
-                self.step.stdio_log.addHeader("signal %s\n" % status_object.value.signal)
+                self.step.stdio_log.addHeader(
+                    "signal %s\n" % status_object.value.signal)
             self.step.processEnded(status_object)
 
     def start(self):
         # render properties
         command = self.command
         # set up argv
-        if type(command) in types.StringTypes:
+        if isinstance(command, (str, bytes)):
             if runtime.platformType == 'win32':
-                argv = os.environ['COMSPEC'].split()  # allow %COMSPEC% to have args
+                # allow %COMSPEC% to have args
+                argv = os.environ['COMSPEC'].split()
                 if '/c' not in argv:
                     argv += ['/c']
                 argv += [command]
@@ -87,7 +91,8 @@ class MasterShellCommand(BuildStep):
                 argv = ['/bin/sh', '-c', command]
         else:
             if runtime.platformType == 'win32':
-                argv = os.environ['COMSPEC'].split()  # allow %COMSPEC% to have args
+                # allow %COMSPEC% to have args
+                argv = os.environ['COMSPEC'].split()
                 if '/c' not in argv:
                     argv += ['/c']
                 argv += list(command)
@@ -96,7 +101,7 @@ class MasterShellCommand(BuildStep):
 
         self.stdio_log = stdio_log = self.addLog("stdio")
 
-        if type(command) in types.StringTypes:
+        if isinstance(command, (str, bytes)):
             stdio_log.addHeader(command.strip() + "\n\n")
         else:
             stdio_log.addHeader(" ".join(command) + "\n\n")
@@ -110,7 +115,7 @@ class MasterShellCommand(BuildStep):
         else:
             assert isinstance(self.env, dict)
             env = self.env
-            for key, v in self.env.iteritems():
+            for key, v in self.env.items():
                 if isinstance(v, list):
                     # Need to do os.pathsep translation.  We could either do that
                     # by replacing all incoming ':'s with os.pathsep, or by
@@ -125,18 +130,20 @@ class MasterShellCommand(BuildStep):
             def subst(match):
                 return os.environ.get(match.group(1), "")
             newenv = {}
-            for key, v in env.iteritems():
+            for key, v in env.items():
                 if v is not None:
-                    if not isinstance(v, basestring):
+                    if not isinstance(v, (str, bytes)):
                         raise RuntimeError("'env' values must be strings or "
                                            "lists; key '%s' is incorrect" % (key,))
                     newenv[key] = p.sub(subst, env[key])
             env = newenv
-        stdio_log.addHeader(" env: %r\n" % (env,))
+
+        if self.logEnviron:
+            stdio_log.addHeader(" env: %r\n" % (env,))
 
         # TODO add a timeout?
         self.process = reactor.spawnProcess(self.LocalPP(self), argv[0], argv,
-                                            path=self.workdir, usePTY=self.usePTY, env=env)
+                                            path=self.masterWorkdir, usePTY=self.usePTY, env=env)
         # (the LocalPP object will call processEnded for us)
 
     def processEnded(self, status_object):
@@ -145,7 +152,8 @@ class MasterShellCommand(BuildStep):
             self.step_status.setText(self.describe(done=True))
             self.finished(FAILURE)
         elif status_object.value.exitCode != 0:
-            self.descriptionDone = ["failed (%d)" % status_object.value.exitCode]
+            self.descriptionDone = [
+                "failed (%d)" % status_object.value.exitCode]
             self.step_status.setText(self.describe(done=True))
             self.finished(FAILURE)
         else:
@@ -159,25 +167,60 @@ class MasterShellCommand(BuildStep):
             pass
         except error.ProcessExitedAlready:
             pass
-        BuildStep.interrupt(self, reason)
+        super().interrupt(reason)
 
 
 class SetProperty(BuildStep):
     name = 'SetProperty'
     description = ['Setting']
     descriptionDone = ['Set']
-    renderables = ['value']
+    renderables = ['property', 'value']
 
     def __init__(self, property, value, **kwargs):
-        BuildStep.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.property = property
         self.value = value
 
-    def start(self):
+    def run(self):
         properties = self.build.getProperties()
-        properties.setProperty(self.property, self.value, self.name, runtime=True)
-        self.step_status.setText(self.describe(done=True))
-        self.finished(SUCCESS)
+        properties.setProperty(
+            self.property, self.value, self.name, runtime=True)
+        return defer.succeed(SUCCESS)
+
+
+class SetProperties(BuildStep):
+    name = 'SetProperties'
+    description = ['Setting Properties..']
+    descriptionDone = ['Properties Set']
+    renderables = ['properties']
+
+    def __init__(self, properties=None, **kwargs):
+        super().__init__(**kwargs)
+        self.properties = properties
+
+    def run(self):
+        if self.properties is None:
+            return defer.succeed(SUCCESS)
+        for k, v in self.properties.items():
+            self.setProperty(k, v, self.name, runtime=True)
+        return defer.succeed(SUCCESS)
+
+
+class Assert(BuildStep):
+    name = 'Assert'
+    description = ['Checking..']
+    descriptionDone = ["checked"]
+    renderables = ['check']
+
+    def __init__(self, check, **kwargs):
+        super().__init__(**kwargs)
+        self.check = check
+        self.descriptionDone = ["checked {}".format(repr(self.check))]
+
+    def run(self):
+        if self.check:
+            return defer.succeed(SUCCESS)
+        return defer.succeed(FAILURE)
 
 
 class LogRenderable(BuildStep):
@@ -187,7 +230,7 @@ class LogRenderable(BuildStep):
     renderables = ['content']
 
     def __init__(self, content, **kwargs):
-        BuildStep.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.content = content
 
     def start(self):

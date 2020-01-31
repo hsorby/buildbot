@@ -13,47 +13,58 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.test.util import www
-from buildbot.www import auth
-from buildbot.www import avatar
 from twisted.internet import defer
 from twisted.trial import unittest
 
+from buildbot.test.util import www
+from buildbot.test.util.misc import TestReactorMixin
+from buildbot.www import auth
+from buildbot.www import avatar
 
-class AvatarResource(www.WwwTestMixin, unittest.TestCase):
+
+class AvatarResource(TestReactorMixin, www.WwwTestMixin, unittest.TestCase):
+
+    def setUp(self):
+        self.setUpTestReactor()
 
     @defer.inlineCallbacks
     def test_default(self):
-        master = self.make_master(url='http://a/b/', auth=auth.NoAuth(), avatar_methods=[])
+        master = self.make_master(
+            url='http://a/b/', auth=auth.NoAuth(), avatar_methods=[])
         rsrc = avatar.AvatarResource(master)
         rsrc.reconfigResource(master.config)
 
-        res = yield self.render_resource(rsrc, '/')
-        self.assertEquals(res, dict(redirected=avatar.AvatarResource.defaultAvatarUrl))
+        res = yield self.render_resource(rsrc, b'/')
+        self.assertEqual(
+            res, dict(redirected=avatar.AvatarResource.defaultAvatarUrl))
 
     @defer.inlineCallbacks
     def test_gravatar(self):
-        master = self.make_master(url='http://a/b/', auth=auth.NoAuth(), avatar_methods=[avatar.AvatarGravatar()])
+        master = self.make_master(
+            url='http://a/b/', auth=auth.NoAuth(), avatar_methods=[avatar.AvatarGravatar()])
         rsrc = avatar.AvatarResource(master)
         rsrc.reconfigResource(master.config)
 
-        res = yield self.render_resource(rsrc, '/?email=foo')
-        self.assertEquals(res, dict(redirected='//www.gravatar.com/avatar/acbd18db4cc2f85ce'
-                                               'def654fccc4a4d8?s=32&d=http%3A%2F%2Fa%2Fb%2Fimg%2Fnobody.png'))
+        res = yield self.render_resource(rsrc, b'/?email=foo')
+        self.assertEqual(res, dict(redirected=b'//www.gravatar.com/avatar/acbd18db4cc2f85ce'
+                                   b'def654fccc4a4d8?d=retro&s=32'))
 
     @defer.inlineCallbacks
     def test_custom(self):
         class CustomAvatar(avatar.AvatarBase):
 
             def getUserAvatar(self, email, size, defaultAvatarUrl):
-                return defer.succeed(("image/png", email + str(size) + defaultAvatarUrl))
+                return defer.succeed((b"image/png", email +
+                                      str(size).encode('utf-8') +
+                                      defaultAvatarUrl))
 
-        master = self.make_master(url='http://a/b/', auth=auth.NoAuth(), avatar_methods=[CustomAvatar()])
+        master = self.make_master(
+            url='http://a/b/', auth=auth.NoAuth(), avatar_methods=[CustomAvatar()])
         rsrc = avatar.AvatarResource(master)
         rsrc.reconfigResource(master.config)
 
-        res = yield self.render_resource(rsrc, '/?email=foo')
-        self.assertEquals(res, "foo32http://a/b/img/nobody.png")
+        res = yield self.render_resource(rsrc, b'/?email=foo')
+        self.assertEqual(res, b"foo32http://a/b/img/nobody.png")
 
     @defer.inlineCallbacks
     def test_custom_not_found(self):
@@ -63,11 +74,11 @@ class AvatarResource(www.WwwTestMixin, unittest.TestCase):
             def getUserAvatar(self, email, size, defaultAvatarUrl):
                 return defer.succeed(None)
 
-        master = self.make_master(url='http://a/b/', auth=auth.NoAuth(),
+        master = self.make_master(url=b'http://a/b/', auth=auth.NoAuth(),
                                   avatar_methods=[CustomAvatar(), avatar.AvatarGravatar()])
         rsrc = avatar.AvatarResource(master)
         rsrc.reconfigResource(master.config)
 
-        res = yield self.render_resource(rsrc, '/?email=foo')
-        self.assertEquals(res, dict(redirected='//www.gravatar.com/avatar/acbd18db4cc2f85ce'
-                                               'def654fccc4a4d8?s=32&d=http%3A%2F%2Fa%2Fb%2Fimg%2Fnobody.png'))
+        res = yield self.render_resource(rsrc, b'/?email=foo')
+        self.assertEqual(res, dict(redirected=b'//www.gravatar.com/avatar/acbd18db4cc2f85ce'
+                         b'def654fccc4a4d8?d=retro&s=32'))

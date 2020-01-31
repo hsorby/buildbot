@@ -13,32 +13,36 @@
 #
 # Copyright Buildbot Team Members
 
+from twisted.trial import unittest
+
 from buildbot import config
-from buildbot.status.results import SUCCESS
+from buildbot.process.results import SUCCESS
 from buildbot.steps.package.deb import lintian
 from buildbot.test.fake.remotecommand import ExpectShell
 from buildbot.test.util import steps
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
-class TestDebLintian(steps.BuildStepMixin, unittest.TestCase):
+class TestDebLintian(steps.BuildStepMixin, TestReactorMixin,
+                     unittest.TestCase):
 
     def setUp(self):
+        self.setUpTestReactor()
         return self.setUpBuildStep()
 
     def tearDown(self):
         return self.tearDownBuildStep()
 
     def test_no_fileloc(self):
-        self.assertRaises(config.ConfigErrors, lambda:
-                          lintian.DebLintian())
+        with self.assertRaises(config.ConfigErrors):
+            lintian.DebLintian()
 
     def test_success(self):
         self.setupStep(lintian.DebLintian('foo_0.23_i386.changes'))
         self.expectCommands(
-            ExpectShell(workdir='wkdir', usePTY='slave-config',
-                        command=['lintian', '-v', 'foo_0.23_i386.changes'])
-            + 0)
+            ExpectShell(workdir='wkdir',
+                        command=['lintian', '-v', 'foo_0.23_i386.changes']) +
+            0)
         self.expectOutcome(result=SUCCESS, state_string="Lintian")
         return self.runStep()
 
@@ -46,9 +50,9 @@ class TestDebLintian(steps.BuildStepMixin, unittest.TestCase):
         self.setupStep(lintian.DebLintian('foo_0.23_i386.changes',
                                           suppressTags=['bad-distribution-in-changes-file']))
         self.expectCommands(
-            ExpectShell(workdir='wkdir', usePTY='slave-config',
+            ExpectShell(workdir='wkdir',
                         command=['lintian', '-v', 'foo_0.23_i386.changes',
-                                 '--suppress-tags', 'bad-distribution-in-changes-file'])
-            + 0)
+                                 '--suppress-tags', 'bad-distribution-in-changes-file']) +
+            0)
         self.expectOutcome(result=SUCCESS)
         return self.runStep()

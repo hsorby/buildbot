@@ -13,18 +13,31 @@
 #
 # Copyright Buildbot Team Members
 
+
 import pkg_resources
 
 from twisted.web import static
 
+from buildbot.util import bytes2unicode
 
-class Application(object):
 
-    def __init__(self, modulename, description):
+class Application:
+
+    def __init__(self, modulename, description, ui=True):
         self.description = description
-        self.version = pkg_resources.resource_string(modulename, "/VERSION").strip()
-        self.static_dir = pkg_resources.resource_filename(modulename, "/static")
+        self.version = pkg_resources.resource_string(
+            modulename, "VERSION").strip()
+        self.version = bytes2unicode(self.version)
+        self.static_dir = pkg_resources.resource_filename(
+            modulename, "static")
         self.resource = static.File(self.static_dir)
+        self.ui = ui
+
+    def setMaster(self, master):
+        self.master = master
+
+    def setConfiguration(self, config):
+        self.config = config
 
     def __repr__(self):
         return ("www.plugin.Application(version=%(version)s, "

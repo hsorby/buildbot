@@ -1,6 +1,6 @@
-.. ==================================
+.. ======================================
    Buildbot Documentation - |version|
-   ==================================
+   ======================================
 
 This is the Buildbot documentation for Buildbot version |version|.
 
@@ -15,6 +15,7 @@ Table Of Contents
 
 .. toctree::
    :maxdepth: 2
+   :numbered: 4
 
    tutorial/index
    manual/index

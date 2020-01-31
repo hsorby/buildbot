@@ -15,8 +15,10 @@
 
 import sqlalchemy as sa
 
-from buildbot.test.util import migration
 from twisted.trial import unittest
+
+from buildbot.test.util import migration
+from buildbot.util import sautils
 
 
 class Migration(migration.MigrateTestMixin, unittest.TestCase):
@@ -31,13 +33,15 @@ class Migration(migration.MigrateTestMixin, unittest.TestCase):
         metadata = sa.MetaData()
         metadata.bind = conn
 
-        builders = sa.Table('builders', metadata,
-                            sa.Column('id', sa.Integer, primary_key=True),
-                            # builder's name
-                            sa.Column('name', sa.Text, nullable=False),
-                            sa.Column('description', sa.Text, nullable=True),
-                            # sha1 of name; used for a unique index
-                            sa.Column('name_hash', sa.String(40), nullable=False),)
+        builders = sautils.Table(
+            'builders', metadata,
+            sa.Column('id', sa.Integer, primary_key=True),
+            # builder's name
+            sa.Column('name', sa.Text, nullable=False),
+            sa.Column('description', sa.Text, nullable=True),
+            # sha1 of name; used for a unique index
+            sa.Column('name_hash', sa.String(40), nullable=False),
+        )
         builders.create()
 
         conn.execute(builders.insert(), [
@@ -51,7 +55,7 @@ class Migration(migration.MigrateTestMixin, unittest.TestCase):
             metadata = sa.MetaData()
             metadata.bind = conn
 
-            builders = sa.Table('builders', metadata, autoload=True)
+            builders = sautils.Table('builders', metadata, autoload=True)
             self.assertIsInstance(builders.c.tags.type, sa.Text)
 
             q = sa.select([builders.c.name, builders.c.tags])

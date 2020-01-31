@@ -13,7 +13,7 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.util import pickle
+
 from twisted.trial import unittest
 
 
@@ -76,16 +76,6 @@ class OldImportPaths(unittest.TestCase):
         from buildbot.scheduler import Try_Userpass
         assert Try_Userpass
 
-    def test_changes_changes_ChangeMaster(self):
-        # this class is handled by buildbot.util.pickle
-        self.assertIn(('buildbot.changes.changes', 'ChangeMaster'),
-                      pickle.substituteClasses)
-
-    def test_changes_changes_Change(self):
-        # this must exist to open old changes pickles
-        from buildbot.changes.changes import Change
-        assert Change
-
     def test_schedulers_filter_ChangeFilter(self):
         # this was the location of ChangeFilter until 0.8.4
         from buildbot.schedulers.filter import ChangeFilter
@@ -99,17 +89,12 @@ class OldImportPaths(unittest.TestCase):
         from buildbot.buildrequest import BuildRequest
         assert BuildRequest
 
-    def test_sourcestamp_SourceStamp(self):
-        # this class is handled by buildbot.util.pickle
-        self.assertIn(('buildbot.sourcestamp', 'SourceStamp'),
-                      pickle.substituteClasses)
-
     def test_process_subunitlogobserver_SubunitShellCommand(self):
         from buildbot.process.subunitlogobserver import SubunitShellCommand
         assert SubunitShellCommand
 
     def test_status_builder_results(self):
-        # these symbols are now in buildbot.status.results, but lots of user
+        # these symbols are now in buildbot.process.results, but lots of user
         # code references them here:
         from buildbot.status.builder import SUCCESS, WARNINGS, FAILURE, SKIPPED
         from buildbot.status.builder import EXCEPTION, RETRY, Results
@@ -121,14 +106,6 @@ class OldImportPaths(unittest.TestCase):
     def test_status_builder_BuildSetStatus(self):
         from buildbot.status.builder import BuildSetStatus
         assert BuildSetStatus
-
-    def test_status_builder_TestResult(self):
-        from buildbot.status.builder import TestResult
-        assert TestResult
-
-    def test_status_builder_SlaveStatus(self):
-        from buildbot.status.builder import SlaveStatus
-        assert SlaveStatus
 
     def test_status_builder_Status(self):
         from buildbot.status.builder import Status

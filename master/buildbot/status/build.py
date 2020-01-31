@@ -13,30 +13,17 @@
 #
 # Copyright Buildbot Team Members
 
-from __future__ import with_statement
 
-import os
-import re
-import shutil
+from twisted.internet import defer
+from twisted.internet import reactor
+from zope.interface import implementer
 
 from buildbot import interfaces
 from buildbot import util
-from buildbot.process import properties
-from buildbot.util import pickle
-from twisted.internet import defer
-from twisted.internet import reactor
-from twisted.persisted import styles
-from twisted.python import components
-from twisted.python import log
-from twisted.python import runtime
-from zope.interface import implements
 
 
-class BuildStatus(styles.Versioned, properties.PropertiesMixin):
-    implements(interfaces.IBuildStatus, interfaces.IStatusEvent)
-
-    persistenceVersion = 4
-    persistenceForgets = ('wasUpgraded', )
+@implementer(interfaces.IBuildStatus, interfaces.IStatusEvent)
+class BuildStatus():
 
     sources = None
     reason = None
@@ -48,9 +35,6 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
     currentStep = None
     text = []
     results = None
-    slavename = "???"
-
-    set_runtime_properties = True
 
     # these lists/dicts are defined here so that unserialized instances have
     # (empty) values. They are set in __init__ to new objects to make sure
@@ -74,7 +58,7 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
         self.finishedWatchers = []
         self.steps = []
         self.testResults = {}
-        self.properties = properties.Properties()
+        self.workername = "???"
 
     def __repr__(self):
         return "<%s #%s>" % (self.__class__.__name__, self.number)
@@ -94,14 +78,6 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
         if self.number == 0:
             return None
         return self.builder.getBuild(self.number - 1)
-
-    def getAllGotRevisions(self):
-        all_got_revisions = self.properties.getProperty('got_revision', {})
-        # For backwards compatibility all_got_revisions is a string if codebases
-        # are not used. Convert to the default internal type (dict)
-        if not isinstance(all_got_revisions, dict):
-            all_got_revisions = {'': all_got_revisions}
-        return all_got_revisions
 
     def getSourceStamps(self, absolute=False):
         return {}
@@ -124,16 +100,13 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
     def getResponsibleUsers(self):
         return self.blamelist
 
-    def getInterestedUsers(self):
-        # TODO: the Builder should add others: sheriffs, domain-owners
-        return self.properties.getProperty('owners', [])
-
     def getSteps(self):
-        """Return a list of IBuildStepStatus objects. For invariant builds
-        (those which always use the same set of Steps), this should be the
-        complete list, however some of the steps may not have started yet
-        (step.getTimes()[0] will be None). For variant builds, this may not
-        be complete (asking again later may give you more of them)."""
+        """Return a list of dictionary objects, each of which describes
+        a step. For invariant builds (those which always use the same set
+        of Steps), this should be the complete list, however some of the
+        steps may not have started yet (step.getTimes()[0] will be None).
+        For variant builds, this may not be complete (asking again later
+        may give you more of them)."""
         return self.steps
 
     def getTimes(self):
@@ -174,8 +147,8 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
     def getResults(self):
         return self.results
 
-    def getSlavename(self):
-        return self.slavename
+    def getWorkername(self):
+        return self.workername
 
     def getTestResults(self):
         return self.testResults
@@ -242,8 +215,8 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
         # the world about us
         self.builder.buildStarted(self)
 
-    def setSlavename(self, slavename):
-        self.slavename = slavename
+    def setWorkername(self, workername):
+        self.workername = workername
 
     def setText(self, text):
         assert isinstance(text, (list, tuple))
@@ -256,10 +229,10 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
         self.currentStep = None
         self.finished = util.now()
 
-        for r in self.updates.keys():
-            if self.updates[r] is not None:
-                self.updates[r].cancel()
-                del self.updates[r]
+        for update in self.updates:
+            if self.updates[update] is not None:
+                self.updates[update].cancel()
+                del self.updates[update]
 
         watchers = self.finishedWatchers
         self.finishedWatchers = []
@@ -278,6 +251,9 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
                 else:
                     step.subscribe(receiver)
                 d = step.waitUntilFinished()
+                # TODO: This actually looks like a bug, but this code
+                # will be removed anyway.
+                # pylint: disable=cell-var-from-loop
                 d.addCallback(lambda step: step.unsubscribe(receiver))
 
         step.waitUntilFinished().addCallback(self._stepFinished)
@@ -293,126 +269,6 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
         # this build is very old: remove the build steps too
         self.steps = []
 
-    # persistence stuff
-
-    def generateLogfileName(self, stepname, logname):
-        """Return a filename (relative to the Builder's base directory) where
-        the logfile's contents can be stored uniquely.
-
-        The base filename is made by combining our build number, the Step's
-        name, and the log's name, then removing unsuitable characters. The
-        filename is then made unique by appending _0, _1, etc, until it does
-        not collide with any other logfile.
-
-        These files are kept in the Builder's basedir (rather than a
-        per-Build subdirectory) because that makes cleanup easier: cron and
-        find will help get rid of the old logs, but the empty directories are
-        more of a hassle to remove."""
-
-        starting_filename = "%d-log-%s-%s" % (self.number, stepname, logname)
-        starting_filename = re.sub(r'[^\w\.\-]', '_', starting_filename)
-        # now make it unique
-        unique_counter = 0
-        filename = starting_filename
-        while filename in [l.filename
-                           for step in self.steps
-                           for l in step.getLogs()
-                           if l.filename]:
-            filename = "%s_%d" % (starting_filename, unique_counter)
-            unique_counter += 1
-        return filename
-
-    def __getstate__(self):
-        d = styles.Versioned.__getstate__(self)
-        # for now, a serialized Build is always "finished". We will never
-        # save unfinished builds.
-        if not self.finished:
-            d['finished'] = util.now()
-            # TODO: push an "interrupted" step so it is clear that the build
-            # was interrupted. The builder will have a 'shutdown' event, but
-            # someone looking at just this build will be confused as to why
-            # the last log is truncated.
-        for k in ['builder', 'watchers', 'updates', 'finishedWatchers',
-                  'master']:
-            if k in d:
-                del d[k]
-        return d
-
-    def __setstate__(self, d):
-        styles.Versioned.__setstate__(self, d)
-        self.watchers = []
-        self.updates = {}
-        self.finishedWatchers = []
-
-    def setProcessObjects(self, builder, master):
-        self.builder = builder
-        self.master = master
-        for step in self.steps:
-            step.setProcessObjects(self, master)
-
-    def upgradeToVersion1(self):
-        if hasattr(self, "sourceStamp"):
-            # the old .sourceStamp attribute wasn't actually very useful
-            maxChangeNumber, patch = self.sourceStamp
-            changes = getattr(self, 'changes', [])
-            # the old SourceStamp class is gone, so use the one that is
-            # provided for backward compatibility
-            from buildbot.util.pickle import SourceStamp
-            source = SourceStamp(branch=None,
-                                 revision=None,
-                                 patch=patch,
-                                 changes=changes)
-            self.source = source
-            self.changes = source.changes
-            del self.sourceStamp
-        self.wasUpgraded = True
-
-    def upgradeToVersion2(self):
-        self.properties = {}
-        self.wasUpgraded = True
-
-    def upgradeToVersion3(self):
-        # in version 3, self.properties became a Properties object
-        propdict = self.properties
-        self.properties = properties.Properties()
-        self.properties.update(propdict, "Upgrade from previous version")
-        self.wasUpgraded = True
-
-    def upgradeToVersion4(self):
-        # buildstatus contains list of sourcestamps, convert single to list
-        if hasattr(self, "source"):
-            self.sources = [self.source]
-            del self.source
-        self.wasUpgraded = True
-
-    def checkLogfiles(self):
-        # check that all logfiles exist, and remove references to any that
-        # have been deleted (e.g., by purge())
-        for s in self.steps:
-            s.checkLogfiles()
-
-    def saveYourself(self):
-        filename = os.path.join(self.builder.basedir, "%d" % self.number)
-        if os.path.isdir(filename):
-            # leftover from 0.5.0, which stored builds in directories
-            shutil.rmtree(filename, ignore_errors=True)
-        tmpfilename = filename + ".tmp"
-        try:
-            with open(tmpfilename, "wb") as f:
-                pickle.dump(self, f, -1)
-            if runtime.platformType == 'win32':
-                # windows cannot rename a file on top of an existing one, so
-                # fall back to delete-first. There are ways this can fail and
-                # lose the builder's history, so we avoid using it in the
-                # general (non-windows) case
-                if os.path.exists(filename):
-                    os.unlink(filename)
-            os.rename(tmpfilename, filename)
-        except Exception:
-            log.msg("unable to save build %s-#%d" % (self.builder.name,
-                                                     self.number))
-            log.err()
-
     def asDict(self):
         result = {}
         # Constant
@@ -423,11 +279,10 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
         result['blame'] = self.getResponsibleUsers()
 
         # Transient
-        result['properties'] = self.getProperties().asList()
         result['times'] = self.getTimes()
         result['text'] = self.getText()
         result['results'] = self.getResults()
-        result['slave'] = self.getSlavename()
+        result['worker'] = self.getWorkername()
         # TODO(maruel): Add.
         # result['test_results'] = self.getTestResults()
         result['logs'] = [[l.getName(),
@@ -439,6 +294,3 @@ class BuildStatus(styles.Versioned, properties.PropertiesMixin):
         else:
             result['currentStep'] = None
         return result
-
-components.registerAdapter(lambda build_status: build_status.properties,
-                           BuildStatus, interfaces.IProperties)

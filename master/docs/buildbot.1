@@ -299,7 +299,7 @@ Print the list of available commands and global options.
 All subsequent commands are ignored.
 .TP
 .BR --version
-Print twistd and buildslave version.
+Print Buildbot and Twisted versions.
 All subsequent commands are ignored.
 .TP
 .BR --verbose
@@ -368,7 +368,7 @@ Set the location of buildmaster's PBChangeSource to attach to in form
 .IR HOST : PORT .
 .TP
 .BR \-u | \-\-username
-Set commiter's username to
+Set committer's username to
 .IR USERNAME .
 .TP
 .BR \-R | \-\-repository
@@ -503,8 +503,5 @@ The jobdir (maildir) for submitting jobs
 master.cfg
 Buildbot master configuration file
 .SH "SEE ALSO"
-.BR buildslave (1),
+.BR buildbot-worker (1),
 .BR patch (1)
-.PP
-The complete documentation is available in texinfo format. To use it, run
-.BR "info buildbot" .

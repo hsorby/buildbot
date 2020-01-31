@@ -15,11 +15,12 @@
 
 import mock
 
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot import config
 from buildbot.process.users import manager
 from buildbot.util import service
-from twisted.internet import defer
-from twisted.trial import unittest
 
 
 class FakeUserManager(service.AsyncMultiService):

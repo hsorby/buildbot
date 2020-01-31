@@ -13,18 +13,21 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.schedulers import timed
-from buildbot.test.util import scheduler
 from twisted.internet import defer
 from twisted.internet import task
 from twisted.trial import unittest
 
+from buildbot.schedulers import timed
+from buildbot.test.util import scheduler
+from buildbot.test.util.misc import TestReactorMixin
 
-class Timed(scheduler.SchedulerMixin, unittest.TestCase):
+
+class Timed(scheduler.SchedulerMixin, TestReactorMixin, unittest.TestCase):
 
     OBJECTID = 928754
 
     def setUp(self):
+        self.setUpTestReactor()
         self.setUpScheduler()
 
     def tearDown(self):
@@ -44,23 +47,7 @@ class Timed(scheduler.SchedulerMixin, unittest.TestCase):
         sched = self.attachScheduler(self.Subclass(**kwargs), self.OBJECTID)
         self.clock = sched._reactor = task.Clock()
         return sched
-
     # tests
 
     # note that most of the heavy-lifting for testing this class is handled by
     # the subclasses' tests, as that's the more natural place for it
-
-    def test_getPendingBuildTimes(self):
-        sched = self.makeScheduler(name='test', builderNames=['foo'])
-
-        sched.activate()
-
-        self.assertEqual(sched.got_lastActuation, None)
-        self.assertEqual(sched.getPendingBuildTimes(), [1060])
-
-        self.clock.advance(1065)
-        self.assertTrue(sched.started_build)
-        self.assertEqual(sched.getPendingBuildTimes(), [1120])
-
-        d = sched.deactivate()
-        return d

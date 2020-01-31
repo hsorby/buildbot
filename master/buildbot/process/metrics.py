@@ -12,8 +12,6 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
-
-from __future__ import with_statement
 r"""
 Buildbot metrics module
 
@@ -33,19 +31,21 @@ Basic architecture:
           \/
     MetricWatcher
 """
+
+import gc
+import os
+import sys
+from collections import defaultdict
 from collections import deque
 
-from buildbot import util
-from buildbot.util import service as util_service
-from collections import defaultdict
 from twisted.application import service
 from twisted.internet import reactor
 from twisted.internet.task import LoopingCall
 from twisted.python import log
 
-import gc
-import os
-import sys
+from buildbot import util
+from buildbot.util import service as util_service
+
 # Make use of the resource module if we can
 try:
     import resource
@@ -54,7 +54,7 @@ except ImportError:
     resource = None
 
 
-class MetricEvent(object):
+class MetricEvent:
 
     @classmethod
     def log(cls, *args, **kwargs):
@@ -75,7 +75,8 @@ class MetricTimeEvent(MetricEvent):
         self.timer = timer
         self.elapsed = elapsed
 
-ALARM_OK, ALARM_WARN, ALARM_CRIT = range(3)
+
+ALARM_OK, ALARM_WARN, ALARM_CRIT = list(range(3))
 ALARM_TEXT = ["OK", "WARN", "CRIT"]
 
 
@@ -96,7 +97,7 @@ def countMethod(counter):
     return decorator
 
 
-class Timer(object):
+class Timer:
     # For testing
     _reactor = None
 
@@ -147,7 +148,7 @@ class FiniteList(deque):
 
     def __init__(self, maxlen=10):
         self._maxlen = maxlen
-        deque.__init__(self)
+        super().__init__()
 
     def append(self, o):
         deque.append(self, o)
@@ -158,15 +159,15 @@ class FiniteList(deque):
 class AveragingFiniteList(FiniteList):
 
     def __init__(self, maxlen=10):
-        FiniteList.__init__(self, maxlen)
+        super().__init__(maxlen)
         self.average = 0
 
     def append(self, o):
-        FiniteList.append(self, o)
+        super().append(o)
         self._calc()
 
     def _calc(self):
-        if len(self) == 0:
+        if not self:
             self.average = 0
         else:
             self.average = float(sum(self)) / len(self)
@@ -174,7 +175,7 @@ class AveragingFiniteList(FiniteList):
         return self.average
 
 
-class MetricHandler(object):
+class MetricHandler:
 
     def __init__(self, metrics):
         self.metrics = metrics
@@ -221,7 +222,7 @@ class MetricCountHandler(MetricHandler):
             self._counters[metric.counter] += metric.count
 
     def keys(self):
-        return self._counters.keys()
+        return list(self._counters)
 
     def get(self, counter):
         return self._counters[counter]
@@ -249,7 +250,7 @@ class MetricTimeHandler(MetricHandler):
         self._timers[metric.timer].append(metric.elapsed)
 
     def keys(self):
-        return self._timers.keys()
+        return list(self._timers)
 
     def get(self, timer):
         return self._timers[timer].average
@@ -292,38 +293,38 @@ class MetricAlarmHandler(MetricHandler):
         return dict(alarms=retval)
 
 
-class AttachedSlavesWatcher(object):
+class AttachedWorkersWatcher:
 
     def __init__(self, metrics):
         self.metrics = metrics
 
     def run(self):
-        # Check if 'BotMaster.attached_slaves' equals
-        # 'AbstractBuildSlave.attached_slaves'
+        # Check if 'BotMaster.attached_workers' equals
+        # 'AbstractWorker.attached_workers'
         h = self.metrics.getHandler(MetricCountEvent)
         if not h:
             log.msg("Couldn't get MetricCountEvent handler")
-            MetricAlarmEvent.log('AttachedSlavesWatcher',
+            MetricAlarmEvent.log('AttachedWorkersWatcher',
                                  msg="Coudln't get MetricCountEvent handler",
                                  level=ALARM_WARN)
             return
-        botmaster_count = h.get('BotMaster.attached_slaves')
-        buildslave_count = h.get('AbstractBuildSlave.attached_slaves')
+        botmaster_count = h.get('BotMaster.attached_workers')
+        worker_count = h.get('AbstractWorker.attached_workers')
 
         # We let these be off by one since they're counted at slightly
         # different times
-        if abs(botmaster_count - buildslave_count) > 1:
+        if abs(botmaster_count - worker_count) > 1:
             level = ALARM_WARN
         else:
             level = ALARM_OK
 
-        MetricAlarmEvent.log('attached_slaves',
-                             msg='%s %s' % (botmaster_count, buildslave_count),
+        MetricAlarmEvent.log('attached_workers',
+                             msg='%s %s' % (botmaster_count, worker_count),
                              level=level)
 
 
 def _get_rss():
-    if sys.platform == 'linux2':
+    if sys.platform == 'linux':
         try:
             with open("/proc/%i/statm" % os.getpid()) as f:
                 return int(f.read().split()[1])
@@ -356,7 +357,8 @@ def periodicCheck(_reactor=reactor):
                 if a == 'ru_maxrss' and v == 0:
                     v = _get_rss() * resource.getpagesize() / 1024
                 MetricCountEvent.log('resource.%s' % a, v, absolute=True)
-            MetricCountEvent.log('resource.pagesize', resource.getpagesize(), absolute=True)
+            MetricCountEvent.log(
+                'resource.pagesize', resource.getpagesize(), absolute=True)
         # Measure the reactor delay
         then = util.now(_reactor)
         dt = 0.1
@@ -375,7 +377,7 @@ class MetricLogObserver(util_service.ReconfigurableServiceMixin,
     _reactor = reactor
 
     def __init__(self):
-        service.MultiService.__init__(self)
+        super().__init__()
         self.setName('metrics')
 
         self.enabled = False
@@ -393,7 +395,7 @@ class MetricLogObserver(util_service.ReconfigurableServiceMixin,
         self.registerHandler(MetricAlarmEvent, MetricAlarmHandler(self))
 
         self.getHandler(MetricCountEvent).addWatcher(
-            AttachedSlavesWatcher(self))
+            AttachedWorkersWatcher(self))
 
     def reconfigServiceWithBuildbotConfig(self, new_config):
         # first, enable or disable
@@ -428,12 +430,11 @@ class MetricLogObserver(util_service.ReconfigurableServiceMixin,
                     self.periodic_task.start(periodic_interval)
 
         # upcall
-        return util_service.ReconfigurableServiceMixin.reconfigServiceWithBuildbotConfig(self,
-                                                                                         new_config)
+        return super().reconfigServiceWithBuildbotConfig(new_config)
 
     def stopService(self):
         self.disable()
-        service.MultiService.stopService(self)
+        super().stopService()
 
     def enable(self):
         if self.enabled:
@@ -480,13 +481,13 @@ class MetricLogObserver(util_service.ReconfigurableServiceMixin,
 
     def asDict(self):
         retval = {}
-        for interface, handler in self.handlers.iteritems():
+        for interface, handler in self.handlers.items():
             retval.update(handler.asDict())
         return retval
 
     def report(self):
         try:
-            for interface, handler in self.handlers.iteritems():
+            for interface, handler in self.handlers.items():
                 report = handler.report()
                 if not report:
                     continue

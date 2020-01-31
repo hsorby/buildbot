@@ -17,6 +17,7 @@
 Steps and objects related to pbuilder
 """
 
+
 import re
 import stat
 import time
@@ -83,7 +84,7 @@ class DebPbuilder(WarningCountingShellCommand):
         @type kwargs: dict
         @param kwargs: All further keyword arguments.
         """
-        WarningCountingShellCommand.__init__(self, **kwargs)
+        super().__init__(**kwargs)
 
         if architecture:
             self.architecture = architecture
@@ -112,14 +113,17 @@ class DebPbuilder(WarningCountingShellCommand):
         if not self.distribution:
             config.error("You must specify a distribution.")
 
-        self.command = ['pdebuild', '--buildresult', '.', '--pbuilder', self.pbuilder]
+        self.command = [
+            'pdebuild', '--buildresult', '.', '--pbuilder', self.pbuilder]
         if self.architecture:
             self.command += ['--architecture', self.architecture]
-        self.command += ['--', '--buildresult', '.', self.baseOption, self.basetgz]
+        self.command += ['--', '--buildresult',
+                         '.', self.baseOption, self.basetgz]
         if self.extrapackages:
             self.command += ['--extrapackages', " ".join(self.extrapackages)]
 
-        self.suppressions.append((None, re.compile(r"\.pbuilderrc does not exist"), None, None))
+        self.suppressions.append(
+            (None, re.compile(r"\.pbuilderrc does not exist"), None, None))
 
         self.addLogObserver(
             'stdio', logobserver.LineConsumerLogObserver(self.logConsumer))
@@ -148,7 +152,7 @@ class DebPbuilder(WarningCountingShellCommand):
             if self.components:
                 command += ['--components', self.components]
 
-            cmd = remotecommand.RemoteShellCommand(self.getWorkdir(), command)
+            cmd = remotecommand.RemoteShellCommand(self.workdir, command)
 
             stdio_log = stdio_log = self.addLog("pbuilder")
             cmd.useLog(stdio_log, True, "stdio")
@@ -167,7 +171,7 @@ class DebPbuilder(WarningCountingShellCommand):
                 command = ['sudo', self.pbuilder, '--update',
                            self.baseOption, self.basetgz]
 
-                cmd = remotecommand.RemoteShellCommand(self.getWorkdir(), command)
+                cmd = remotecommand.RemoteShellCommand(self.workdir, command)
                 stdio_log = stdio_log = self.addLog("pbuilder")
                 cmd.useLog(stdio_log, True, "stdio")
                 d = self.runCommand(cmd)
@@ -183,7 +187,7 @@ class DebPbuilder(WarningCountingShellCommand):
             log.msg("Failure when running %s." % cmd)
             self.finished(FAILURE)
         else:
-            return WarningCountingShellCommand.start(self)
+            return super().start()
 
     def logConsumer(self):
         r = re.compile(r"dpkg-genchanges  >\.\./(.+\.changes)")

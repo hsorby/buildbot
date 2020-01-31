@@ -38,6 +38,19 @@ tl;dr is:
   }
 }
 
+/* animation for  */
+.anim-fade {
+    -webkit-transition: .5s linear all;
+    transition:  .5s linear all;
+    opacity: 1;
+    &.ng-hide-remove,
+    &.ng-hide-add,.list.ng-hide {
+      display:block!important;
+    }
+    &.ng-hide {
+        opacity: 0;
+    }
+}
 /* animation for validation tooltips in force forms */
 .anim-popover {
   &.ng-enter,
@@ -117,4 +130,18 @@ tl;dr is:
     transform-origin:70% 70%;
     animation-iteration-count: infinite;
     animation-timing-function: linear;
+}
+.nut-spin {
+  animation: nut-spin .5s infinite linear;
+}
+@keyframes nut-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(20deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
 }

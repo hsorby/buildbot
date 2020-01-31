@@ -13,30 +13,77 @@
 #
 # Copyright Buildbot Team Members
 
+from twisted.internet import defer
+from twisted.python import log
 
 from buildbot import locks
 from buildbot import util
 from buildbot.process import metrics
 from buildbot.process.builder import Builder
 from buildbot.process.buildrequestdistributor import BuildRequestDistributor
+from buildbot.process.results import CANCELLED
+from buildbot.process.results import RETRY
+from buildbot.process.workerforbuilder import States
 from buildbot.util import service
-from twisted.internet import defer
-from twisted.internet import reactor
-from twisted.python import log
 
 
-class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
+class LockRetrieverMixin:
 
-    """This is the master-side service which manages remote buildbot slaves.
-    It provides them with BuildSlaves, and distributes build requests to
+    @defer.inlineCallbacks
+    def getLockByID(self, lockid, config_version):
+        ''' Convert a Lock identifier into an actual Lock instance.
+            @lockid: a locks.MasterLock or locks.WorkerLock instance
+            @config_version: The version of the config from which the list of locks has been
+                acquired by the downstream user.
+            @return: a locks.RealMasterLock or locks.RealWorkerLock instance
+
+            The real locks are tracked using lock ID and config_version. The latter is used as a
+            way to track most recent properties of real locks.
+
+            This approach is needed because there's no central registry of lock access instances
+            that are used within a Buildbot master.cfg (like there is for e.g c['builders']). All
+            lock accesses bring all lock information with themselves as the lockid member.
+            Therefore, the reconfig process is relatively complicated, because we don't know
+            whether a specific access instance encodes lock information before reconfig or after.
+            Taking into account config_version allows us to know when properties of a lock should
+            be updated.
+
+            Note that the user may create multiple lock ids with different maxCount values. It's
+            unspecified which maxCount value the real lock will have.
+        '''
+        assert isinstance(config_version, int)
+        lock = yield lockid.lockClass.getService(self, lockid.name)
+
+        if config_version > lock.config_version:
+            lock.updateFromLockId(lockid, config_version)
+        return lock
+
+    def getLockFromLockAccess(self, access, config_version):
+        # Convert a lock-access object into an actual Lock instance.
+        if not isinstance(access, locks.LockAccess):
+            # Buildbot 0.7.7 compatibility: user did not specify access
+            access = access.defaultAccess()
+        return self.getLockByID(access.lockid, config_version)
+
+    @defer.inlineCallbacks
+    def getLockFromLockAccesses(self, accesses, config_version):
+        # converts locks to their real forms
+        locks = yield defer.gatherResults([self.getLockFromLockAccess(access, config_version)
+                                           for access in accesses])
+        return zip(locks, accesses)
+
+
+class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService, LockRetrieverMixin):
+
+    """This is the master-side service which manages remote buildbot workers.
+    It provides them with Workers, and distributes build requests to
     them."""
 
     debug = 0
+    name = "botmaster"
 
-    def __init__(self, master):
-        service.AsyncMultiService.__init__(self)
-        self.setName("botmaster")
-        self.master = master
+    def __init__(self):
+        super().__init__()
 
         self.builders = {}
         self.builderNames = []
@@ -45,12 +92,7 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
 
         self.watchers = {}
 
-        # self.locks holds the real Lock instances
-        self.locks = {}
-
         self.shuttingDown = False
-
-        self.lastSlavePortnum = None
 
         # subscription to new build requests
         self.buildrequest_consumer = None
@@ -59,51 +101,77 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
         self.brd = BuildRequestDistributor(self)
         self.brd.setServiceParent(self)
 
-    def cleanShutdown(self, _reactor=reactor):
+    @defer.inlineCallbacks
+    def cleanShutdown(self, quickMode=False, stopReactor=True):
         """Shut down the entire process, once all currently-running builds are
-        complete."""
+        complete.
+        quickMode will mark all builds as retry (except the ones that were triggered)
+        """
         if self.shuttingDown:
             return
         log.msg("Initiating clean shutdown")
         self.shuttingDown = True
-
         # first, stop the distributor; this will finish any ongoing scheduling
         # operations before firing
-        d = self.brd.stopService()
+        yield self.brd.disownServiceParent()
 
-        # then wait for all builds to finish
-        def wait(_):
-            l = []
+        # Double check that we're still supposed to be shutting down
+        # The shutdown may have been cancelled!
+        while self.shuttingDown:
+            if quickMode:
+                for builder in self.builders.values():
+                    # As we stop the builds, builder.building might change during loop
+                    # so we need to copy the list
+                    for build in list(builder.building):
+                        # if build is waited for then this is a sub-build, so
+                        # no need to retry it
+                        if sum(br.waitedFor for br in build.requests):
+                            results = CANCELLED
+                        else:
+                            results = RETRY
+                        is_building = build.workerforbuilder.state == States.BUILDING
+                        build.stopBuild("Master Shutdown", results)
+                        if not is_building:
+                            # if it is not building, then it must be a latent worker
+                            # which is substantiating. Cancel it.
+                            build.workerforbuilder.worker.insubstantiate()
+            # then wait for all builds to finish
+            dl = []
             for builder in self.builders.values():
-                for build in builder.builder_status.getCurrentBuilds():
-                    l.append(build.waitUntilFinished())
-            if len(l) == 0:
+                for build in builder.building:
+                    # build may be waiting for ping to worker to succeed which
+                    # may never happen if the connection to worker was broken
+                    # without TCP connection being severed
+                    build.workerforbuilder.abortPingIfAny()
+
+                    dl.append(build.waitUntilFinished())
+            if not dl:
                 log.msg("No running jobs, starting shutdown immediately")
             else:
-                log.msg("Waiting for %i build(s) to finish" % len(l))
-                return defer.DeferredList(l)
-        d.addCallback(wait)
+                log.msg("Waiting for %i build(s) to finish" % len(dl))
+                yield defer.DeferredList(dl)
 
-        # Finally, shut the whole process down
-        def shutdown(ign):
-            # Double check that we're still supposed to be shutting down
-            # The shutdown may have been cancelled!
-            if self.shuttingDown:
-                # Check that there really aren't any running builds
-                for builder in self.builders.values():
-                    n = len(builder.builder_status.getCurrentBuilds())
-                    if n > 0:
-                        log.msg("Not shutting down, builder %s has %i builds running" % (builder, n))
-                        log.msg("Trying shutdown sequence again")
-                        self.shuttingDown = False
-                        self.cleanShutdown()
-                        return
-                log.msg("Stopping reactor")
-                _reactor.stop()
+            # Check that there really aren't any running builds
+            n = 0
+            for builder in self.builders.values():
+                if builder.building:
+                    num_builds = len(builder.building)
+                    log.msg("Builder %s has %i builds running" %
+                            (builder, num_builds))
+                    n += num_builds
+            if n > 0:
+                log.msg(
+                    "Not shutting down, there are %i builds running" % n)
+                log.msg("Trying shutdown sequence again")
+                yield util.asyncSleep(1)
             else:
-                self.brd.startService()
-        d.addCallback(shutdown)
-        d.addErrback(log.err, 'while processing cleanShutdown')
+                if stopReactor and self.shuttingDown:
+                    log.msg("Stopping reactor")
+                    self.master.reactor.stop()
+                break
+
+        if not self.shuttingDown:
+            yield self.brd.setServiceParent(self)
 
     def cancelCleanShutdown(self):
         """Cancel a clean shutdown that is already in progress, if any"""
@@ -112,23 +180,23 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
         log.msg("Cancelling clean shutdown")
         self.shuttingDown = False
 
-    @metrics.countMethod('BotMaster.slaveLost()')
-    def slaveLost(self, bot):
-        metrics.MetricCountEvent.log("BotMaster.attached_slaves", -1)
+    @metrics.countMethod('BotMaster.workerLost()')
+    def workerLost(self, bot):
+        metrics.MetricCountEvent.log("BotMaster.attached_workers", -1)
         for name, b in self.builders.items():
-            if bot.slavename in b.config.slavenames:
+            if bot.workername in b.config.workernames:
                 b.detached(bot)
 
-    @metrics.countMethod('BotMaster.getBuildersForSlave()')
-    def getBuildersForSlave(self, slavename):
+    @metrics.countMethod('BotMaster.getBuildersForWorker()')
+    def getBuildersForWorker(self, workername):
         return [b for b in self.builders.values()
-                if slavename in b.config.slavenames]
+                if workername in b.config.workernames]
 
     def getBuildernames(self):
         return self.builderNames
 
     def getBuilders(self):
-        return self.builders.values()
+        return list(self.builders.values())
 
     @defer.inlineCallbacks
     def startService(self):
@@ -152,7 +220,7 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
         self.buildrequest_consumer_unclaimed = yield startConsuming(
             buildRequestAdded,
             ('buildrequests', None, 'unclaimed'))
-        yield service.AsyncMultiService.startService(self)
+        yield super().startService()
 
     @defer.inlineCallbacks
     def reconfigServiceWithBuildbotConfig(self, new_config):
@@ -163,8 +231,7 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
         yield self.reconfigServiceBuilders(new_config)
 
         # call up
-        yield service.ReconfigurableServiceMixin.reconfigServiceWithBuildbotConfig(self,
-                                                                                   new_config)
+        yield super().reconfigServiceWithBuildbotConfig(new_config)
 
         # try to start a build for every builder; this is necessary at master
         # startup, and a good idea in any other case
@@ -179,13 +246,13 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
         timer.start()
 
         # arrange builders by name
-        old_by_name = dict([(b.name, b)
-                            for b in list(self)
-                            if isinstance(b, Builder)])
-        old_set = set(old_by_name.iterkeys())
-        new_by_name = dict([(bc.name, bc)
-                            for bc in new_config.builders])
-        new_set = set(new_by_name.iterkeys())
+        old_by_name = {b.name: b
+                       for b in list(self)
+                       if isinstance(b, Builder)}
+        old_set = set(old_by_name)
+        new_by_name = {bc.name: bc
+                       for bc in new_config.builders}
+        new_set = set(new_by_name)
 
         # calculate new builders, by name, and removed builders
         removed_names, added_names = util.diffSets(old_set, new_set)
@@ -201,8 +268,7 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
                 builder.master = None
                 builder.botmaster = None
 
-                yield defer.maybeDeferred(lambda:
-                                          builder.disownServiceParent())
+                yield defer.maybeDeferred(builder.disownServiceParent)
 
             for n in added_names:
                 builder = Builder(n)
@@ -212,11 +278,11 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
                 builder.master = self.master
                 yield builder.setServiceParent(self)
 
-        self.builderNames = self.builders.keys()
+        self.builderNames = list(self.builders)
 
         yield self.master.data.updates.updateBuilderList(
             self.master.masterid,
-            [util.ascii2unicode(n) for n in self.builderNames])
+            [util.bytes2unicode(n) for n in self.builderNames])
 
         metrics.MetricCountEvent.log("num_builders",
                                      len(self.builders), absolute=True)
@@ -230,32 +296,7 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
         if self.buildrequest_consumer_unclaimed:
             self.buildrequest_consumer_unclaimed.stopConsuming()
             self.buildrequest_consumer_unclaimed = None
-        for b in self.builders.values():
-            b.builder_status.addPointEvent(["master", "shutdown"])
-            b.builder_status.saveYourself()
-        return service.AsyncMultiService.stopService(self)
-
-    def getLockByID(self, lockid):
-        """Convert a Lock identifier into an actual Lock instance.
-        @param lockid: a locks.MasterLock or locks.SlaveLock instance
-        @return: a locks.RealMasterLock or locks.RealSlaveLock instance
-        """
-        assert isinstance(lockid, (locks.MasterLock, locks.SlaveLock))
-        if lockid not in self.locks:
-            self.locks[lockid] = lockid.lockClass(lockid)
-        # if the master.cfg file has changed maxCount= on the lock, the next
-        # time a build is started, they'll get a new RealLock instance. Note
-        # that this requires that MasterLock and SlaveLock (marker) instances
-        # be hashable and that they should compare properly.
-        return self.locks[lockid]
-
-    def getLockFromLockAccess(self, access):
-        # Convert a lock-access object into an actual Lock instance.
-        if not isinstance(access, locks.LockAccess):
-            # Buildbot 0.7.7 compability: user did not specify access
-            access = access.defaultAccess()
-        lock = self.getLockByID(access.lockid)
-        return lock
+        return super().stopService()
 
     def maybeStartBuildsForBuilder(self, buildername):
         """
@@ -266,14 +307,14 @@ class BotMaster(service.ReconfigurableServiceMixin, service.AsyncMultiService):
         """
         self.brd.maybeStartBuildsOn([buildername])
 
-    def maybeStartBuildsForSlave(self, buildslave_name):
+    def maybeStartBuildsForWorker(self, worker_name):
         """
-        Call this when something suggests that a particular slave may now be
+        Call this when something suggests that a particular worker may now be
         available to start a build.
 
-        @param buildslave_name: the name of the slave
+        @param worker_name: the name of the worker
         """
-        builders = self.getBuildersForSlave(buildslave_name)
+        builders = self.getBuildersForWorker(worker_name)
         self.brd.maybeStartBuildsOn([b.name for b in builders])
 
     def maybeStartBuildsForAllBuilders(self):

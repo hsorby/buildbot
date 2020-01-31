@@ -13,11 +13,23 @@
 #
 # Copyright Buildbot Team Members
 
-from StringIO import StringIO
+from io import BytesIO
+
 from mock import Mock
 
 from twisted.internet import defer
 from twisted.web import server
+
+from buildbot.test.fake import fakemaster
+
+
+def fakeMasterForHooks(testcase):
+    # testcase must derive from TestReactorMixin and setUpTestReactor()
+    # must be called before calling this function.
+
+    master = fakemaster.make_master(testcase, wantData=True)
+    master.www = Mock()
+    return master
 
 
 class FakeRequest(Mock):
@@ -28,28 +40,30 @@ class FakeRequest(Mock):
     arguments to self.addedChanges.
     """
 
-    written = ''
+    written = b''
     finished = False
     redirected_to = None
     failure = None
 
-    def __init__(self, args={}, content=''):
-        Mock.__init__(self)
+    def __init__(self, args=None, content=b''):
+        super().__init__()
+
+        if args is None:
+            args = {}
 
         self.args = args
-        self.content = StringIO(content)
+        self.content = BytesIO(content)
         self.site = Mock()
         self.site.buildbot_service = Mock()
-        master = self.site.buildbot_service.master = Mock()
-
-        self.addedChanges = []
-
-        def addChange(**kwargs):
-            self.addedChanges.append(kwargs)
-            return defer.succeed(Mock())
-        master.addChange = addChange
+        self.uri = b'/'
+        self.prepath = []
+        self.method = b'GET'
+        self.received_headers = {}
 
         self.deferred = defer.Deferred()
+
+    def getHeader(self, key):
+        return self.received_headers.get(key)
 
     def write(self, data):
         self.written = self.written + data
@@ -70,12 +84,28 @@ class FakeRequest(Mock):
 
     # cribed from twisted.web.test._util._render
     def test_render(self, resource):
+        for arg in self.args:
+            if not isinstance(arg, bytes):
+                raise ValueError("self.args: {!r},  contains "
+                    "values which are not bytes".format(self.args))
+
+        if self.uri and not isinstance(self.uri, bytes):
+            raise ValueError("self.uri: {!r} is {}, not bytes".format(
+                self.uri, type(self.uri)))
+
+        if self.method and not isinstance(self.method, bytes):
+            raise ValueError("self.method: {!r} is {}, not bytes".format(
+                self.method, type(self.method)))
+
         result = resource.render(self)
-        if isinstance(result, str):
+        if isinstance(result, bytes):
             self.write(result)
             self.finish()
             return self.deferred
+        elif isinstance(result, str):
+            raise ValueError("{!r} should return bytes, not {}: {!r}".format(
+                resource.render, type(result), result))
         elif result is server.NOT_DONE_YET:
             return self.deferred
         else:
-            raise ValueError("Unexpected return value: %r" % (result,))
+            raise ValueError("Unexpected return value: {!r}".format(result))

@@ -15,9 +15,10 @@
 
 import mock
 
+from twisted.trial import unittest
+
 from buildbot.clients import tryclient
 from buildbot.scripts import trycmd
-from twisted.trial import unittest
 
 
 class TestStatusLog(unittest.TestCase):

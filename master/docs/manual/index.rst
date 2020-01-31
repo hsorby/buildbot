@@ -7,13 +7,14 @@ Buildbot Manual
    :maxdepth: 2
 
    introduction
-   installation
+   installation/index
    concepts
-   configuration
+   secretsmanagement
+   configuration/index
    customization
-   new-style-steps
    cmdline
    resources
    optimization
    plugins
    deploy
+   upgrading/index

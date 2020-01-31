@@ -15,12 +15,14 @@
 
 import mock
 
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot.mq import simple
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import interfaces
 from buildbot.test.util import tuplematching
-from twisted.internet import defer
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
 class Tests(interfaces.InterfaceTests):
@@ -48,6 +50,11 @@ class Tests(interfaces.InterfaceTests):
 
         @self.assertArgSpecMatches(cons.stopConsuming)
         def stopConsuming(self):
+            pass
+
+    def test_signature_waitUntilEvent(self):
+        @self.assertArgSpecMatches(self.mq.waitUntilEvent)
+        def waitUntilEvent(self, filter, check_callback):
             pass
 
 
@@ -115,17 +122,31 @@ class RealTests(tuplematching.TupleMatchingMixin, Tests):
 
         self.assertTrue(cb.called)
 
+    @defer.inlineCallbacks
+    def test_waitUntilEvent_check_false(self):
+        d = self.mq.waitUntilEvent(('abc',), lambda: False)
+        self.assertEqual(d.called, False)
+        self.mq.produce(('abc',), dict(x=1))
+        self.assertEqual(d.called, True)
+        res = yield d
+        self.assertEqual(res, (('abc',), dict(x=1)))
+    timeout = 3  # those tests should not run long
 
-class TestFakeMQ(unittest.TestCase, Tests):
+
+class TestFakeMQ(TestReactorMixin, unittest.TestCase, Tests):
 
     def setUp(self):
-        self.master = fakemaster.make_master(testcase=self, wantMq=True)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self, wantMq=True)
         self.mq = self.master.mq
         self.mq.verifyMessages = False
 
 
-class TestSimpleMQ(unittest.TestCase, RealTests):
+class TestSimpleMQ(TestReactorMixin, unittest.TestCase, RealTests):
 
+    @defer.inlineCallbacks
     def setUp(self):
-        self.master = fakemaster.make_master()
-        self.mq = simple.SimpleMQ(self.master)
+        self.setUpTestReactor()
+        self.master = fakemaster.make_master(self)
+        self.mq = simple.SimpleMQ()
+        yield self.mq.setServiceParent(self.master)

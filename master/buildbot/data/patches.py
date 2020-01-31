@@ -13,9 +13,9 @@
 #
 # Copyright Buildbot Team Members
 
+
 from buildbot.data import base
 from buildbot.data import types
-
 
 # NOTE: patches are not available via endpoints
 

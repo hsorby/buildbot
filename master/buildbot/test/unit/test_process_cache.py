@@ -15,8 +15,10 @@
 
 import mock
 
-from buildbot.process import cache
+from twisted.internet import defer
 from twisted.trial import unittest
+
+from buildbot.process import cache
 
 
 class CacheManager(unittest.TestCase):
@@ -36,17 +38,16 @@ class CacheManager(unittest.TestCase):
         self.assertIdentical(foo_cache, foo_cache2)
         self.assertNotIdentical(foo_cache, bar_cache)
 
+    @defer.inlineCallbacks
     def test_reconfigServiceWithBuildbotConfig(self):
         # load config with one cache loaded and the other not
         foo_cache = self.caches.get_cache("foo", None)
-        d = self.caches.reconfigServiceWithBuildbotConfig(
+        yield self.caches.reconfigServiceWithBuildbotConfig(
             self.make_config(foo=5, bar=6, bing=11))
 
-        @d.addCallback
-        def check(_):
-            bar_cache = self.caches.get_cache("bar", None)
-            self.assertEqual((foo_cache.max_size, bar_cache.max_size),
-                             (5, 6))
+        bar_cache = self.caches.get_cache("bar", None)
+        self.assertEqual((foo_cache.max_size, bar_cache.max_size),
+                         (5, 6))
 
     def test_get_metrics(self):
         self.caches.get_cache("foo", None)

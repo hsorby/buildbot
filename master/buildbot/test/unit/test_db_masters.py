@@ -13,16 +13,17 @@
 #
 # Copyright Buildbot Team Members
 
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot.db import masters
 from buildbot.test.fake import fakedb
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import connector_component
 from buildbot.test.util import interfaces
 from buildbot.test.util import validation
+from buildbot.test.util.misc import TestReactorMixin
 from buildbot.util import epoch2datetime
-from twisted.internet import defer
-from twisted.internet import task
-from twisted.trial import unittest
 
 SOMETIME = 1348971992
 SOMETIME_DT = epoch2datetime(SOMETIME)
@@ -63,8 +64,7 @@ class Tests(interfaces.InterfaceTests):
 
     @defer.inlineCallbacks
     def test_findMasterId_new(self):
-        id = yield self.db.masters.findMasterId('some:master',
-                                                _reactor=self.clock)
+        id = yield self.db.masters.findMasterId('some:master')
         masterdict = yield self.db.masters.getMaster(id)
         self.assertEqual(masterdict,
                          dict(id=id, name='some:master', active=False,
@@ -91,7 +91,7 @@ class Tests(interfaces.InterfaceTests):
                           active=1, last_active=OTHERTIME),
         ])
         activated = yield self.db.masters.setMasterState(
-            masterid=7, active=True, _reactor=self.clock)
+            masterid=7, active=True)
         self.assertFalse(activated)  # it was already active
         masterdict = yield self.db.masters.getMaster(7)
         self.assertEqual(masterdict,
@@ -105,7 +105,7 @@ class Tests(interfaces.InterfaceTests):
                           active=0, last_active=OTHERTIME),
         ])
         activated = yield self.db.masters.setMasterState(
-            masterid=7, active=True, _reactor=self.clock)
+            masterid=7, active=True)
         self.assertTrue(activated)
         masterdict = yield self.db.masters.getMaster(7)
         self.assertEqual(masterdict,
@@ -119,7 +119,7 @@ class Tests(interfaces.InterfaceTests):
                           active=1, last_active=OTHERTIME),
         ])
         deactivated = yield self.db.masters.setMasterState(
-            masterid=7, active=False, _reactor=self.clock)
+            masterid=7, active=False)
         self.assertTrue(deactivated)
         masterdict = yield self.db.masters.getMaster(7)
         self.assertEqual(masterdict,
@@ -133,7 +133,7 @@ class Tests(interfaces.InterfaceTests):
                           active=0, last_active=OTHERTIME),
         ])
         deactivated = yield self.db.masters.setMasterState(
-            masterid=7, active=False, _reactor=self.clock)
+            masterid=7, active=False)
         self.assertFalse(deactivated)
         masterdict = yield self.db.masters.getMaster(7)
         self.assertEqual(masterdict,
@@ -167,13 +167,17 @@ class Tests(interfaces.InterfaceTests):
         masterlist = yield self.db.masters.getMasters()
         for masterdict in masterlist:
             validation.verifyDbDict(self, 'masterdict', masterdict)
+
+        def masterKey(master):
+            return master['id']
+
         expected = sorted([
             dict(id=7, name='some:master',
                  active=0, last_active=SOMETIME_DT),
             dict(id=8, name='other:master',
                  active=1, last_active=OTHERTIME_DT),
-        ])
-        self.assertEqual(sorted(masterlist), expected)
+        ], key=masterKey)
+        self.assertEqual(sorted(masterlist, key=masterKey), expected)
 
 
 class RealTests(Tests):
@@ -189,7 +193,7 @@ class RealTests(Tests):
             fakedb.SchedulerMaster(schedulerid=21, masterid=7),
         ])
         deactivated = yield self.db.masters.setMasterState(
-            masterid=7, active=False, _reactor=self.clock)
+            masterid=7, active=False)
         self.assertTrue(deactivated)
 
         # check that the scheduler_masters row was deleted
@@ -199,13 +203,13 @@ class RealTests(Tests):
         yield self.db.pool.do(thd)
 
 
-class TestFakeDB(unittest.TestCase, Tests):
+class TestFakeDB(TestReactorMixin, unittest.TestCase, Tests):
 
     def setUp(self):
-        self.clock = task.Clock()
-        self.clock.advance(SOMETIME)
-        self.master = fakemaster.make_master()
-        self.db = fakedb.FakeDBConnector(self.master, self)
+        self.setUpTestReactor()
+        self.reactor.advance(SOMETIME)
+        self.master = fakemaster.make_master(self, wantDb=True)
+        self.db = self.master.db
         self.db.checkForeignKeys = True
         self.insertTestData = self.db.insertTestData
 
@@ -214,17 +218,14 @@ class TestRealDB(unittest.TestCase,
                  connector_component.ConnectorComponentMixin,
                  RealTests):
 
+    @defer.inlineCallbacks
     def setUp(self):
-        self.clock = task.Clock()
-        self.clock.advance(SOMETIME)
-
-        d = self.setUpConnectorComponent(
+        yield self.setUpConnectorComponent(
             table_names=['masters', 'schedulers', 'scheduler_masters'])
 
-        @d.addCallback
-        def finish_setup(_):
-            self.db.masters = masters.MastersConnectorComponent(self.db)
-        return d
+        self.reactor.advance(SOMETIME)
+
+        self.db.masters = masters.MastersConnectorComponent(self.db)
 
     def tearDown(self):
         return self.tearDownConnectorComponent()

@@ -13,36 +13,36 @@
 #
 # Copyright Buildbot Team Members
 
+
+from twisted.internet import defer
+
+from buildbot.process import botmaster
 from buildbot.util import service
 
 
-class FakeBotMaster(service.AsyncMultiService):
+class FakeBotMaster(service.AsyncMultiService, botmaster.LockRetrieverMixin):
 
-    def __init__(self, master):
-        service.AsyncMultiService.__init__(self)
+    def __init__(self):
+        super().__init__()
         self.setName("fake-botmaster")
-        self.master = master
-        self.locks = {}
-        self.builders = {}
-        self.buildsStartedForSlaves = []
+        self.builders = {}  # dictionary mapping worker names to builders
+        self.buildsStartedForWorkers = []
+        self.delayShutdown = False
 
-    def getLockByID(self, lockid):
-        if lockid not in self.locks:
-            self.locks[lockid] = lockid.lockClass(lockid)
-        # if the master.cfg file has changed maxCount= on the lock, the next
-        # time a build is started, they'll get a new RealLock instance. Note
-        # that this requires that MasterLock and SlaveLock (marker) instances
-        # be hashable and that they should compare properly.
-        return self.locks[lockid]
+    def getBuildersForWorker(self, workername):
+        return self.builders.get(workername, [])
 
-    def getLockFromLockAccess(self, access):
-        return self.getLockByID(access.lockid)
+    def maybeStartBuildsForWorker(self, workername):
+        self.buildsStartedForWorkers.append(workername)
 
-    def getBuildersForSlave(self, slavename):
-        return self.builders.get(slavename, [])
+    def maybeStartBuildsForAllBuilders(self):
+        self.buildsStartedForWorkers += self.builders.keys()
 
-    def maybeStartBuildsForSlave(self, slavename):
-        self.buildsStartedForSlaves.append(slavename)
-
-    def slaveLost(self, slave):
+    def workerLost(self, bot):
         pass
+
+    def cleanShutdown(self, quickMode=False, stopReactor=True):
+        self.shuttingDown = True
+        if self.delayShutdown:
+            self.shutdownDeferred = defer.Deferred()
+            return self.shutdownDeferred

@@ -13,18 +13,28 @@
 #
 # Copyright Buildbot Team Members
 
+
+import re
+
 from twisted.internet import defer
 from twisted.python import log
 from twisted.web import resource
 from twisted.web import server
 from twisted.web.error import Error
 
+from buildbot.util import unicode2bytes
+
+_CR_LF_RE = re.compile(br"[\r\n]+.*")
+
+
+def protect_redirect_url(url):
+    return _CR_LF_RE.sub(b"", url)
+
 
 class Redirect(Error):
-
     def __init__(self, url):
-        Error.__init__(self, 302, "redirect")
-        self.url = url
+        super().__init__(302, "redirect")
+        self.url = protect_redirect_url(unicode2bytes(url))
 
 
 class Resource(resource.Resource):
@@ -42,9 +52,9 @@ class Resource(resource.Resource):
         return self.master.config.buildbotURL
 
     def __init__(self, master):
-        resource.Resource.__init__(self)
+        super().__init__()
         self.master = master
-        if self.needsReconfig:
+        if self.needsReconfig and master is not None:
             master.www.resourceNeedsReconfigs(self)
 
     def reconfigResource(self, new_config):
@@ -53,14 +63,14 @@ class Resource(resource.Resource):
     def asyncRenderHelper(self, request, _callable, writeError=None):
         def writeErrorDefault(msg, errcode=400):
             request.setResponseCode(errcode)
-            request.setHeader('content-type', 'text/plain; charset=utf-8')
+            request.setHeader(b'content-type', b'text/plain; charset=utf-8')
             request.write(msg)
             request.finish()
         if writeError is None:
             writeError = writeErrorDefault
         try:
             d = _callable(request)
-        except Exception, e:
+        except Exception as e:
             d = defer.fail(e)
 
         @d.addCallback
@@ -69,7 +79,7 @@ class Resource(resource.Resource):
                 if s is not None:
                     request.write(s)
                 request.finish()
-            except RuntimeError:  # pragma: no-cover
+            except RuntimeError:  # pragma: no cover
                 # this occurs when the client has already disconnected; ignore
                 # it (see #2027)
                 log.msg("http client disconnected before results were sent")
@@ -85,13 +95,14 @@ class Resource(resource.Resource):
         def failHttpError(f):
             f.trap(Error)
             e = f.value
-            writeError(e.message, errcode=e.status)
+            message = unicode2bytes(e.message)
+            writeError(message, errcode=int(e.status))
 
         @d.addErrback
         def fail(f):
             log.err(f, 'While rendering resource:')
             try:
-                writeError('internal error - see logs', errcode=500)
+                writeError(b'internal error - see logs', errcode=500)
             except Exception:
                 try:
                     request.finish()
@@ -104,10 +115,10 @@ class Resource(resource.Resource):
 class RedirectResource(Resource):
 
     def __init__(self, master, basepath):
-        Resource.__init__(self, master)
+        super().__init__(master)
         self.basepath = basepath
 
     def render(self, request):
         redir = self.base_url + self.basepath
-        request.redirect(redir)
+        request.redirect(protect_redirect_url(redir))
         return redir

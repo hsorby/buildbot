@@ -13,7 +13,6 @@
 #
 # Copyright Buildbot Team Members
 
-import email.utils as email_utils
 import re
 import traceback
 
@@ -22,7 +21,9 @@ from twisted.python.reflect import accumulateClassList
 
 from buildbot import config
 from buildbot.process.properties import Properties
+from buildbot.reporters.mail import VALID_EMAIL_ADDR
 from buildbot.schedulers import base
+from buildbot.util import identifiers
 
 
 class ValidationError(ValueError):
@@ -33,10 +34,10 @@ class CollectedValidationError(ValueError):
 
     def __init__(self, errors):
         self.errors = errors
-        ValueError.__init__(self, "\n".join([k + ":" + v for k, v in errors.iteritems()]))
+        super().__init__("\n".join([k + ":" + v for k, v in errors.items()]))
 
 
-class ValidationErrorCollector(object):
+class ValidationErrorCollector:
 
     def __init__(self):
         self.errors = {}
@@ -47,11 +48,11 @@ class ValidationErrorCollector(object):
         try:
             res = yield defer.maybeDeferred(fn, *args, **kwargs)
         except CollectedValidationError as e:
-            for name, e in e.errors.iteritems():
-                self.errors[name] = e
+            for error_name, e in e.errors.items():
+                self.errors[error_name] = e
         except ValueError as e:
             self.errors[name] = str(e)
-        defer.returnValue(res)
+        return res
 
     def maybeRaiseCollectedErrors(self):
         errors = self.errors
@@ -62,13 +63,13 @@ class ValidationErrorCollector(object):
 DefaultField = object()  # sentinel object to signal default behavior
 
 
-class BaseParameter(object):
+class BaseParameter:
 
     """
     BaseParameter provides a base implementation for property customization
     """
     spec_attributes = ["name", "fullName", "label", "tablabel", "type", "default", "required",
-                       "multiple", "regex", "hide"]
+                       "multiple", "regex", "hide", "maxsize", "autopopulate"]
     name = ""
     parentName = None
     label = ""
@@ -80,11 +81,14 @@ class BaseParameter(object):
     regex = None
     debug = True
     hide = False
+    maxsize = None
+    autopopulate = None
 
     @property
     def fullName(self):
         """A full name, intended to uniquely identify a parameter"""
-        # join with '_' if both are set (cannot put '.', because it is used as **kwargs)
+        # join with '_' if both are set (cannot put '.', because it is used as
+        # **kwargs)
         if self.parentName and self.name:
             return self.parentName + '_' + self.name
         # otherwise just use the one that is set
@@ -112,7 +116,8 @@ class BaseParameter(object):
         """
 
         if name in ["owner", "builderNames", "builderid"]:
-            config.error("%s cannot be used as a parameter name, because it is reserved" % (name,))
+            config.error(
+                "%s cannot be used as a parameter name, because it is reserved" % (name,))
         self.name = name
         self.label = name if label is None else label
         self.tablabel = self.label if tablabel is None else tablabel
@@ -136,12 +141,13 @@ class BaseParameter(object):
 
         # delete white space for args
         for arg in args:
-            if not arg.strip():
+            if isinstance(arg, str) and not arg.strip():
                 args.remove(arg)
 
-        if len(args) == 0:
+        if not args:
             if self.required:
-                raise ValidationError("'%s' needs to be specified" % (self.label))
+                raise ValidationError(
+                    "'%s' needs to be specified" % (self.label))
             if self.multiple:
                 args = self.default
             else:
@@ -152,10 +158,15 @@ class BaseParameter(object):
                 if not self.regex.match(arg):
                     raise ValidationError("%s:'%s' does not match pattern '%s'"
                                           % (self.label, arg, self.regex.pattern))
+        if self.maxsize is not None:
+            for arg in args:
+                if len(arg) > self.maxsize:
+                    raise ValidationError("%s: is too large %d > %d"
+                                          % (self.label, len(arg), self.maxsize))
 
         try:
             arg = self.parse_from_args(args)
-        except Exception, e:
+        except Exception as e:
             # an exception will just display an alert in the web UI
             # also log the exception
             if self.debug:
@@ -174,9 +185,8 @@ class BaseParameter(object):
         """Secondary customization point, called from getFromKwargs to turn
            a validated value into a single property value"""
         if self.multiple:
-            return map(self.parse_from_arg, l)
-        else:
-            return self.parse_from_arg(l[0])
+            return [self.parse_from_arg(arg) for arg in l]
+        return self.parse_from_arg(l[0])
 
     def parse_from_arg(self, s):
         return s
@@ -238,27 +248,27 @@ class BooleanParameter(BaseParameter):
     type = "bool"
 
     def getFromKwargs(self, kwargs):
-        return kwargs.get(self.fullName, None) == [True]
+        return kwargs.get(self.fullName, [self.default]) == [True]
 
 
 class UserNameParameter(StringParameter):
 
     """A username parameter to supply the 'owner' of a build"""
     spec_attributes = ["need_email"]
-    type = "text"
+    type = "username"
     default = ""
     size = 30
     need_email = True
 
     def __init__(self, name="username", label="Your name:", **kw):
-        BaseParameter.__init__(self, name, label, **kw)
+        super().__init__(name, label, **kw)
 
     def parse_from_arg(self, s):
         if not s and not self.required:
             return s
         if self.need_email:
-            e = email_utils.parseaddr(s)
-            if e[0] == '' or e[1] == '':
+            res = VALID_EMAIL_ADDR.search(s)
+            if res is None:
                 raise ValidationError("%s: please fill in email address in the "
                                       "form 'User <email@email.com>'" % (self.name,))
         return s
@@ -276,7 +286,8 @@ class ChoiceStringParameter(BaseParameter):
 
     def parse_from_arg(self, s):
         if self.strict and s not in self.choices:
-            raise ValidationError("'%s' does not belong to list of available choices '%s'" % (s, self.choices))
+            raise ValidationError(
+                "'%s' does not belong to list of available choices '%s'" % (s, self.choices))
         return s
 
     def getChoices(self, master, scheduler, buildername):
@@ -294,14 +305,15 @@ class InheritBuildParameter(ChoiceStringParameter):
         return self.compatible_builds(master.status, buildername)
 
     def getFromKwargs(self, kwargs):
-        raise ValidationError("InheritBuildParameter can only be used by properties")
+        raise ValidationError(
+            "InheritBuildParameter can only be used by properties")
 
     def updateFromKwargs(self, master, properties, changes, kwargs, **unused):
         arg = kwargs.get(self.fullName, [""])[0]
-        splitted_arg = arg.split(" ")[0].split("/")
-        if len(splitted_arg) != 2:
+        split_arg = arg.split(" ")[0].split("/")
+        if len(split_arg) != 2:
             raise ValidationError("bad build: %s" % (arg))
-        builder, num = splitted_arg
+        builder, num = split_arg
         builder_status = master.status.getBuilder(builder)
         if not builder_status:
             raise ValidationError("unknown builder: %s in %s" % (builder, arg))
@@ -318,41 +330,49 @@ class InheritBuildParameter(ChoiceStringParameter):
         changes.extend(b.changes)
 
 
-class BuildslaveChoiceParameter(ChoiceStringParameter):
+class WorkerChoiceParameter(ChoiceStringParameter):
 
-    """A parameter that lets the buildslave name be explicitly chosen.
+    """A parameter that lets the worker name be explicitly chosen.
 
-    This parameter works in conjunction with 'buildbot.process.builder.enforceChosenSlave',
+    This parameter works in conjunction with 'buildbot.process.builder.enforceChosenWorker',
     which should be added as the 'canStartBuild' parameter to the Builder.
 
     The "anySentinel" parameter represents the sentinel value to specify that
-    there is no buildslave preference.
+    there is no worker preference.
     """
     anySentinel = '-any-'
-    label = 'Build slave'
+    label = 'Worker'
     required = False
     strict = False
 
-    def __init__(self, name='slavename', **kwargs):
-        ChoiceStringParameter.__init__(self, name, **kwargs)
+    def __init__(self, name='workername', **kwargs):
+        super().__init__(name, **kwargs)
 
     def updateFromKwargs(self, kwargs, **unused):
-        slavename = self.getFromKwargs(kwargs)
-        if slavename == self.anySentinel:
-            # no preference, so dont set a parameter at all
+        workername = self.getFromKwargs(kwargs)
+        if workername == self.anySentinel:
+            # no preference, so don't set a parameter at all
             return
-        ChoiceStringParameter.updateFromKwargs(self, kwargs=kwargs, **unused)
+        super().updateFromKwargs(kwargs=kwargs, **unused)
 
     def getChoices(self, master, scheduler, buildername):
         if buildername is None:
             # this is the "Force All Builds" page
-            slavenames = master.status.getSlaveNames()
+            workernames = master.status.getWorkerNames()
         else:
             builderStatus = master.status.getBuilder(buildername)
-            slavenames = [slave.getName() for slave in builderStatus.getSlaves()]
-        slavenames.sort()
-        slavenames.insert(0, self.anySentinel)
-        return slavenames
+            workernames = [worker.getName()
+                           for worker in builderStatus.getWorkers()]
+        workernames.sort()
+        workernames.insert(0, self.anySentinel)
+        return workernames
+
+
+class FileParameter(BaseParameter):
+    """A parameter which allows to download a whole file and store it as a property or patch
+    """
+    type = 'file'
+    maxsize = 1024 * 1024 * 10  # 10M
 
 
 class NestedParameter(BaseParameter):
@@ -372,29 +392,33 @@ class NestedParameter(BaseParameter):
        The result of a NestedParameter is typically a dictionary, with the key/value
        being the name/value of the children.
     """
-    spec_attributes = ["layout", "columns"]  # field is recursive, and thus managed in custom getSpec
+    spec_attributes = [
+        "layout", "columns"]  # field is recursive, and thus managed in custom getSpec
     type = 'nested'
     layout = 'vertical'
     fields = None
     columns = None
 
     def __init__(self, name, fields, **kwargs):
-        BaseParameter.__init__(self, fields=fields, name=name, **kwargs)
+        super().__init__(fields=fields, name=name, **kwargs)
         # reasonable defaults for the number of columns
         if self.columns is None:
-            if len(fields) >= 4:
+            num_visible_fields = len(
+                [field for field in fields if not field.hide])
+            if num_visible_fields >= 4:
                 self.columns = 2
             else:
                 self.columns = 1
         if self.columns > 4:
-            config.error("UI only support up to 4 columns in nested parameters")
+            config.error(
+                "UI only support up to 4 columns in nested parameters")
 
         # fix up the child nodes with the parent (use None for now):
         self.setParent(None)
 
     def setParent(self, parent):
-        BaseParameter.setParent(self, parent)
-        for field in self.fields:
+        super().setParent(parent)
+        for field in self.fields:  # pylint: disable=not-an-iterable
             field.setParent(self)
 
     @defer.inlineCallbacks
@@ -403,7 +427,7 @@ class NestedParameter(BaseParameter):
            called by child classes to fix up the fullName->name conversions."""
 
         childProperties = {}
-        for field in self.fields:
+        for field in self.fields:  # pylint: disable=not-an-iterable
             yield collector.collectValidationErrors(field.fullName,
                                                     field.updateFromKwargs,
                                                     kwargs=kwargs,
@@ -429,9 +453,11 @@ class NestedParameter(BaseParameter):
         d.update(kwargs[self.fullName])
 
     def getSpec(self):
-        ret = BaseParameter.getSpec(self)
+        ret = super().getSpec()
+        # pylint: disable=not-an-iterable
         ret['fields'] = [field.getSpec() for field in self.fields]
         return ret
+
 
 ParameterGroup = NestedParameter
 
@@ -447,10 +473,11 @@ class AnyPropertyParameter(NestedParameter):
             StringParameter(name='name', label="Name:"),
             StringParameter(name='value', label="Value:"),
         ]
-        NestedParameter.__init__(self, name, label='', fields=fields, **kw)
+        super().__init__(name, label='', fields=fields, **kw)
 
     def getFromKwargs(self, kwargs):
-        raise ValidationError("AnyPropertyParameter can only be used by properties")
+        raise ValidationError(
+            "AnyPropertyParameter can only be used by properties")
 
     @defer.inlineCallbacks
     def updateFromKwargs(self, master, properties, kwargs, collector, **kw):
@@ -471,7 +498,8 @@ class AnyPropertyParameter(NestedParameter):
 
         if not pname_validate.match(pname) \
                 or not pval_validate.match(pvalue):
-            raise ValidationError("bad property name='%s', value='%s'" % (pname, pvalue))
+            raise ValidationError(
+                "bad property name='%s', value='%s'" % (pname, pvalue))
         properties[pname] = pvalue
 
 
@@ -490,6 +518,7 @@ class CodebaseParameter(NestedParameter):
                  revision=DefaultField,
                  repository=DefaultField,
                  project=DefaultField,
+                 patch=None,
 
                  **kwargs):
         """
@@ -518,15 +547,22 @@ class CodebaseParameter(NestedParameter):
         for k, v in fields_dict.items():
             if v is DefaultField:
                 v = StringParameter(name=k, label=k.capitalize() + ":")
-            elif isinstance(v, basestring):
+            elif isinstance(v, str):
                 v = FixedParameter(name=k, default=v)
             fields_dict[k] = v
 
-        fields = filter(None, fields_dict.values())
+        fields = [val for k, val in sorted(fields_dict.items(), key=lambda x: x[0]) if val]
+        if patch is not None:
+            if patch.name != "patch":
+                config.error(
+                    "patch parameter of a codebase must be named 'patch'")
+            fields.append(patch)
+            if self.columns is None and 'columns' not in kwargs:
+                self.columns = 1
 
-        NestedParameter.__init__(self, name=name, label=label,
-                                 codebase=codebase,
-                                 fields=fields, **kwargs)
+        super().__init__(name=name, label=label,
+                         codebase=codebase,
+                         fields=fields, **kwargs)
 
     def createSourcestamp(self, properties, kwargs):
         # default, just return the things we put together
@@ -543,11 +579,37 @@ class CodebaseParameter(NestedParameter):
         # convert the "property" to a sourcestamp
         ss = self.createSourcestamp(properties, kwargs)
         if ss is not None:
+            patch = ss.pop('patch', None)
+            if patch is not None:
+                for k, v in patch.items():
+                    ss['patch_' + k] = v
+
             sourcestamps[self.codebase] = ss
 
 
 def oneCodebase(**kw):
     return [CodebaseParameter('', **kw)]
+
+
+class PatchParameter(NestedParameter):
+    """A patch parameter contains pre-configure UI for all the needed components for a sourcestamp patch
+    """
+    columns = 1
+
+    def __init__(self, **kwargs):
+        name = kwargs.pop('name', 'patch')
+        default_fields = [
+            FileParameter('body'),
+            IntParameter('level', default=1),
+            StringParameter('author', default=""),
+            StringParameter('comment', default=""),
+            StringParameter('subdir', default=".")
+        ]
+        fields = [
+            kwargs.pop(field.name, field)
+            for field in default_fields
+        ]
+        super().__init__(name, fields=fields, **kwargs)
 
 
 class ForceScheduler(base.BaseScheduler):
@@ -563,13 +625,13 @@ class ForceScheduler(base.BaseScheduler):
 
     def __init__(self, name, builderNames,
                  username=UserNameParameter(),
-                 reason=StringParameter(name="reason", default="force build", size=20),
+                 reason=StringParameter(
+                     name="reason", default="force build", size=20),
                  reasonString="A build was forced by '%(owner)s': %(reason)s",
-                 buttonName="Force Build",
+                 buttonName=None,
                  codebases=None,
                  label=None,
-                 properties=[],
-                 ):
+                 properties=None):
         """
         Initialize a ForceScheduler.
 
@@ -609,28 +671,34 @@ class ForceScheduler(base.BaseScheduler):
                          name)
 
         if not name:
-            config.error("ForceScheduler name must not be empty: %r " %
+            config.error("ForceScheduler name must not be empty: %r" %
                          name)
 
-        if not self.checkIfListOfType(builderNames, str):
-            config.error("ForceScheduler builderNames must be a list of strings: %r" %
-                         builderNames)
+        if not identifiers.ident_re.match(name):
+            config.error("ForceScheduler name must be an identifier: %r" %
+                         name)
+
+        if not self.checkIfListOfType(builderNames, (str,)):
+            config.error("ForceScheduler '%s': builderNames must be a list of strings: %r" %
+                         (name, builderNames))
 
         if self.checkIfType(reason, BaseParameter):
             self.reason = reason
         else:
-            config.error("ForceScheduler reason must be a StringParameter: %r" %
-                         reason)
+            config.error("ForceScheduler '%s': reason must be a StringParameter: %r" %
+                         (name, reason))
 
+        if properties is None:
+            properties = []
         if not self.checkIfListOfType(properties, BaseParameter):
-            config.error("ForceScheduler properties must be a list of BaseParameters: %r" %
-                         properties)
+            config.error("ForceScheduler '%s': properties must be a list of BaseParameters: %r" %
+                         (name, properties))
 
         if self.checkIfType(username, BaseParameter):
             self.username = username
         else:
-            config.error("ForceScheduler username must be a StringParameter: %r" %
-                         username)
+            config.error("ForceScheduler '%s': username must be a StringParameter: %r" %
+                         (name, username))
 
         self.forcedProperties = []
         self.label = name if label is None else label
@@ -639,25 +707,31 @@ class ForceScheduler(base.BaseScheduler):
         if codebases is None:
             codebases = [CodebaseParameter(codebase='')]
         elif not codebases:
-            config.error("ForceScheduler: 'codebases' cannot be empty; use [CodebaseParameter(codebase='', hide=True)] if needed: %r " % (codebases,))
+            config.error("ForceScheduler '%s': 'codebases' cannot be empty;"
+                         " use [CodebaseParameter(codebase='', hide=True)] if needed: %r " % (
+                             name, codebases))
         elif not isinstance(codebases, list):
-            config.error("ForceScheduler: 'codebases' should be a list of strings or CodebaseParameter, not %s" % type(codebases))
+            config.error("ForceScheduler '%s': 'codebases' should be a list of strings or CodebaseParameter,"
+                         " not %s" % (
+                             name, type(codebases)))
 
         codebase_dict = {}
         for codebase in codebases:
-            if isinstance(codebase, basestring):
+            if isinstance(codebase, str):
                 codebase = CodebaseParameter(codebase=codebase)
             elif not isinstance(codebase, CodebaseParameter):
-                config.error("ForceScheduler: 'codebases' must be a list of strings or CodebaseParameter objects: %r" % (codebases,))
+                config.error("ForceScheduler '%s': 'codebases' must be a list of strings"
+                             " or CodebaseParameter objects: %r" % (
+                                 name, codebases))
 
             self.forcedProperties.append(codebase)
-            codebase_dict[codebase.codebase] = dict(branch='', repository='', revision='')
+            codebase_dict[codebase.codebase] = dict(
+                branch='', repository='', revision='')
 
-        base.BaseScheduler.__init__(self,
-                                    name=name,
-                                    builderNames=builderNames,
-                                    properties={},
-                                    codebases=codebase_dict)
+        super().__init__(name=name,
+                         builderNames=builderNames,
+                         properties={},
+                         codebases=codebase_dict)
 
         if properties:
             self.forcedProperties.extend(properties)
@@ -667,7 +741,7 @@ class ForceScheduler(base.BaseScheduler):
         self.all_fields.extend(self.forcedProperties)
 
         self.reasonString = reasonString
-        self.buttonName = buttonName
+        self.buttonName = buttonName or name
 
     def checkIfType(self, obj, chkType):
         return isinstance(obj, chkType)
@@ -700,19 +774,16 @@ class ForceScheduler(base.BaseScheduler):
                                                     sourcestamps=sourcestamps,
                                                     collector=collector,
                                                     kwargs=kwargs)
-        changeids = map(lambda a: type(a) == int and a or a.number, changeids)
+        changeids = [type(a) == int and a or a.number for a in changeids]
 
         real_properties = Properties()
         for pname, pvalue in properties.items():
             real_properties.setProperty(pname, pvalue, "Force Build Form")
 
-        defer.returnValue((real_properties, changeids, sourcestamps))
+        return (real_properties, changeids, sourcestamps)
 
     @defer.inlineCallbacks
-    def force(self, owner, builderNames=None, builderid=None, **kwargs):
-        """
-        We check the parameters, and launch the build, if everything is correct
-        """
+    def computeBuilderNames(self, builderNames=None, builderid=None):
         if builderNames is None:
             if builderid is not None:
                 builder = yield self.master.data.get(('builders', str(builderid)))
@@ -720,23 +791,32 @@ class ForceScheduler(base.BaseScheduler):
             else:
                 builderNames = self.builderNames
         else:
-            builderNames = list(set(builderNames).intersection(self.builderNames))
+            builderNames = sorted(
+                set(builderNames).intersection(self.builderNames))
+        return builderNames
 
+    @defer.inlineCallbacks
+    def force(self, owner, builderNames=None, builderid=None, **kwargs):
+        """
+        We check the parameters, and launch the build, if everything is correct
+        """
+        builderNames = yield self.computeBuilderNames(builderNames, builderid)
         if not builderNames:
             raise KeyError("builderNames not specified or not supported")
 
         # Currently the validation code expects all kwargs to be lists
         # I don't want to refactor that now so much sure we comply...
-        kwargs = dict((k, [v]) if not isinstance(v, list) else (k, v) for k, v in kwargs.items())
+        kwargs = dict((k, [v]) if not isinstance(v, list) else (k, v)
+                      for k, v in kwargs.items())
 
         # probably need to clean that out later as the IProperty is already a
         # validation mechanism
         collector = ValidationErrorCollector()
         reason = yield collector.collectValidationErrors(self.reason.fullName,
                                                          self.reason.getFromKwargs, kwargs)
-        if owner is None:
-            owner = yield collector.collectValidationErrors(self.owner.fullName,
-                                                            self.owner.getFromKwargs, kwargs)
+        if owner is None or owner == "anonymous":
+            owner = yield collector.collectValidationErrors(self.username.fullName,
+                                                            self.username.getFromKwargs, kwargs)
 
         properties, changeids, sourcestamps = yield self.gatherPropertiesAndChanges(
             collector, **kwargs)
@@ -749,11 +829,12 @@ class ForceScheduler(base.BaseScheduler):
         r = self.reasonString % {'owner': owner, 'reason': reason}
 
         # turn sourcestamps into a list
-        for cb, ss in sourcestamps.iteritems():
+        for cb, ss in sourcestamps.items():
             ss['codebase'] = cb
-        sourcestamps = sourcestamps.values()
+        sourcestamps = list(sourcestamps.values())
 
-        # everything is validated, we can create our source stamp, and buildrequest
+        # everything is validated, we can create our source stamp, and
+        # buildrequest
         res = yield self.addBuildsetForSourceStampsWithDefaults(
             reason=r,
             sourcestamps=sourcestamps,
@@ -761,4 +842,4 @@ class ForceScheduler(base.BaseScheduler):
             builderNames=builderNames,
         )
 
-        defer.returnValue(res)
+        return res

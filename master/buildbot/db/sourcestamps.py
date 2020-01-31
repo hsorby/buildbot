@@ -13,14 +13,18 @@
 #
 # Copyright Buildbot Team Members
 
+
 import base64
+
 import sqlalchemy as sa
 
-from buildbot.db import base
-from buildbot.util import epoch2datetime
 from twisted.internet import defer
-from twisted.internet import reactor
 from twisted.python import log
+
+from buildbot.db import base
+from buildbot.util import bytes2unicode
+from buildbot.util import epoch2datetime
+from buildbot.util import unicode2bytes
 
 
 class SsDict(dict):
@@ -32,14 +36,23 @@ class SsList(list):
 
 
 class SourceStampsConnectorComponent(base.DBConnectorComponent):
-    # Documentation is in developer/db.rst
+    # Documentation is in developer/database.rst
 
     @defer.inlineCallbacks
     def findSourceStampId(self, branch=None, revision=None, repository=None,
                           project=None, codebase=None, patch_body=None,
                           patch_level=None, patch_author=None,
-                          patch_comment=None, patch_subdir=None,
-                          _reactor=reactor):
+                          patch_comment=None, patch_subdir=None):
+        sourcestampid, _ = yield self.findOrCreateId(
+            branch, revision, repository, project, codebase, patch_body,
+            patch_level, patch_author, patch_comment, patch_subdir)
+        return sourcestampid
+
+    @defer.inlineCallbacks
+    def findOrCreateId(self, branch=None, revision=None, repository=None,
+                       project=None, codebase=None, patch_body=None,
+                       patch_level=None, patch_author=None,
+                       patch_comment=None, patch_subdir=None):
         tbl = self.db.model.sourcestamps
 
         assert codebase is not None, "codebase cannot be None"
@@ -54,10 +67,12 @@ class SourceStampsConnectorComponent(base.DBConnectorComponent):
         def thd(conn):
             patchid = None
             if patch_body:
+                patch_body_bytes = unicode2bytes(patch_body)
+                patch_base64_bytes = base64.b64encode(patch_body_bytes)
                 ins = self.db.model.patches.insert()
                 r = conn.execute(ins, dict(
                     patchlevel=patch_level,
-                    patch_base64=base64.b64encode(patch_body),
+                    patch_base64=bytes2unicode(patch_base64_bytes),
                     patch_author=patch_author,
                     patch_comment=patch_comment,
                     subdir=patch_subdir))
@@ -67,7 +82,7 @@ class SourceStampsConnectorComponent(base.DBConnectorComponent):
 
         ss_hash = self.hashColumns(branch, revision, repository, project,
                                    codebase, patchid)
-        sourcestampid = yield self.findSomethingId(
+        sourcestampid, found = yield self.findOrCreateSomethingId(
             tbl=tbl,
             whereclause=tbl.c.ss_hash == ss_hash,
             insert_values={
@@ -78,10 +93,11 @@ class SourceStampsConnectorComponent(base.DBConnectorComponent):
                 'project': project,
                 'patchid': patchid,
                 'ss_hash': ss_hash,
-                'created_at': _reactor.seconds(),
+                'created_at': self.master.reactor.seconds(),
             })
-        defer.returnValue(sourcestampid)
+        return sourcestampid, found
 
+    # returns a Deferred that returns a value
     @base.cached("ssdicts")
     def getSourceStamp(self, ssid):
         def thd(conn):
@@ -96,6 +112,7 @@ class SourceStampsConnectorComponent(base.DBConnectorComponent):
             return ssdict
         return self.db.pool.do(thd)
 
+    # returns a Deferred that returns a value
     def getSourceStampsForBuild(self, buildid):
         assert buildid > 0
 
@@ -116,13 +133,15 @@ class SourceStampsConnectorComponent(base.DBConnectorComponent):
             from_clause = from_clause.join(sstamps_tbl,
                                            bsss_tbl.c.sourcestampid == sstamps_tbl.c.id)
 
-            q = sa.select([sstamps_tbl]).select_from(from_clause).where(builds_tbl.c.id == buildid)
+            q = sa.select([sstamps_tbl]).select_from(
+                from_clause).where(builds_tbl.c.id == buildid)
             res = conn.execute(q)
             return [self._rowToSsdict_thd(conn, row)
                     for row in res.fetchall()]
 
         return self.db.pool.do(thd)
 
+    # returns a Deferred that returns a value
     def getSourceStamps(self):
         def thd(conn):
             tbl = self.db.model.sourcestamps
@@ -155,8 +174,7 @@ class SourceStampsConnectorComponent(base.DBConnectorComponent):
                 ssdict['patch_subdir'] = row.subdir
                 ssdict['patch_author'] = row.patch_author
                 ssdict['patch_comment'] = row.patch_comment
-                body = base64.b64decode(row.patch_base64)
-                ssdict['patch_body'] = body
+                ssdict['patch_body'] = base64.b64decode(row.patch_base64)
             else:
                 log.msg('patchid %d, referenced from ssid %d, not found'
                         % (patchid, ssid))

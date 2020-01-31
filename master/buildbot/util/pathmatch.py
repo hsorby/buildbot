@@ -24,7 +24,7 @@ def ident(x):
     raise TypeError
 
 
-class Matcher(object):
+class Matcher:
 
     def __init__(self):
         self._patterns = {}
@@ -73,10 +73,10 @@ class Matcher(object):
             raise KeyError('No match for %r' % (path,))
 
     def iterPatterns(self):
-        return self._patterns.iteritems()
+        return list(self._patterns.items())
 
     def _compile(self):
         self._by_length = {}
         for k, v in self.iterPatterns():
-            l = len(k)
-            self._by_length.setdefault(l, {})[k] = v
+            length = len(k)
+            self._by_length.setdefault(length, {})[k] = v

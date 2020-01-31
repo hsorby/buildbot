@@ -13,12 +13,14 @@
 #
 # Copyright Buildbot Team Members
 
+
+from zope.interface import implementer
+
 from buildbot import interfaces
-from zope.interface import implements
 
 
-class LogObserver(object):
-    implements(interfaces.ILogObserver)
+@implementer(interfaces.ILogObserver)
+class LogObserver:
 
     def setStep(self, step):
         self.step = step
@@ -55,6 +57,7 @@ class LogLineObserver(LogObserver):
     headerDelimiter = "\n"
 
     def __init__(self):
+        super().__init__()
         self.max_length = 16384
 
     def setMaxLineLength(self, max_length):
@@ -83,23 +86,20 @@ class LogLineObserver(LogObserver):
     def outLineReceived(self, line):
         """This will be called with complete stdout lines (not including the
         delimiter). Override this in your observer."""
-        pass
 
     def errLineReceived(self, line):
         """This will be called with complete lines of stderr (not including
         the delimiter). Override this in your observer."""
-        pass
 
     def headerLineReceived(self, line):
         """This will be called with complete lines of stderr (not including
         the delimiter). Override this in your observer."""
-        pass
 
 
 class LineConsumerLogObserver(LogLineObserver):
 
     def __init__(self, consumerFunction):
-        LogLineObserver.__init__(self)
+        super().__init__()
         self.generator = None
         self.consumerFunction = consumerFunction
 
@@ -108,7 +108,7 @@ class LineConsumerLogObserver(LogLineObserver):
         # data, since the observer may be instantiated during configuration as
         # well as for each execution of the step.
         self.generator = self.consumerFunction()
-        self.generator.next()
+        next(self.generator)
         # shortcut all remaining feed operations
         self.feed = self.generator.send
         self.feed(input)
@@ -142,7 +142,7 @@ class OutputProgressObserver(LogObserver):
 class BufferLogObserver(LogObserver):
 
     def __init__(self, wantStdout=True, wantStderr=False):
-        LogObserver.__init__(self)
+        super().__init__()
         self.stdout = [] if wantStdout else None
         self.stderr = [] if wantStderr else None
 
@@ -155,16 +155,12 @@ class BufferLogObserver(LogObserver):
             self.stderr.append(data)
 
     def _get(self, chunks):
-        if chunks is None:
-            return [u'']
-        if len(chunks) > 1:
-            chunks = [''.join(chunks)]
-        elif not chunks:
-            chunks = [u'']
-        return chunks
+        if chunks is None or not chunks:
+            return ''
+        return ''.join(chunks)
 
     def getStdout(self):
-        return self._get(self.stdout)[0]
+        return self._get(self.stdout)
 
     def getStderr(self):
-        return self._get(self.stderr)[0]
+        return self._get(self.stderr)

@@ -13,6 +13,7 @@
 #
 # Copyright Buildbot Team Members
 
+import json
 import os
 
 from twisted.internet import defer
@@ -23,8 +24,7 @@ from twisted.spread import pb
 from buildbot import pbutil
 from buildbot.process.properties import Properties
 from buildbot.schedulers import base
-from buildbot.util import ascii2unicode
-from buildbot.util import json
+from buildbot.util import bytes2unicode
 from buildbot.util import netstrings
 from buildbot.util.maildir import MaildirService
 
@@ -62,25 +62,26 @@ class BadJobfile(Exception):
 
 class JobdirService(MaildirService):
     # NOTE: tightly coupled with Try_Jobdir, below. We used to track it as a "parent"
-    # via the MultiService API, but now we just track it as the member "self.scheduler"
+    # via the MultiService API, but now we just track it as the member
+    # "self.scheduler"
+    name = 'JobdirService'
 
     def __init__(self, scheduler, basedir=None):
         self.scheduler = scheduler
-        MaildirService.__init__(self, basedir)
+        super().__init__(basedir)
 
     def messageReceived(self, filename):
-        f = self.moveToCurDir(filename)
-        return self.scheduler.handleJobFile(filename, f)
+        with self.moveToCurDir(filename) as f:
+            rv = self.scheduler.handleJobFile(filename, f)
+        return rv
 
 
 class Try_Jobdir(TryBase):
 
     compare_attrs = ('jobdir',)
 
-    def __init__(self, name, builderNames, jobdir,
-                 properties={}):
-        TryBase.__init__(self, name=name, builderNames=builderNames,
-                         properties=properties)
+    def __init__(self, name, builderNames, jobdir, **kwargs):
+        super().__init__(name, builderNames, **kwargs)
         self.jobdir = jobdir
         self.watcher = JobdirService(scheduler=self)
 
@@ -98,7 +99,10 @@ class Try_Jobdir(TryBase):
 
     @defer.inlineCallbacks
     def activate(self):
-        yield TryBase.activate(self)
+        yield super().activate()
+
+        if not self.enabled:
+            return
 
         # set the watcher's basedir now that we have a master
         jobdir = os.path.join(self.master.basedir, self.jobdir)
@@ -113,7 +117,11 @@ class Try_Jobdir(TryBase):
 
     @defer.inlineCallbacks
     def deactivate(self):
-        yield TryBase.deactivate(self)
+        yield super().deactivate()
+
+        if not self.enabled:
+            return
+
         # bridge the activate/deactivate to a startService/stopService on the
         # child service
         self.watcher.stopService()
@@ -142,7 +150,8 @@ class Try_Jobdir(TryBase):
         p = netstrings.NetstringParser()
         f.seek(0, 2)
         if f.tell() > basic.NetstringReceiver.MAX_LENGTH:
-            raise BadJobfile("The patch size is greater that NetStringReceiver.MAX_LENGTH. Please Set this higher in the master.cfg")
+            raise BadJobfile(
+                "The patch size is greater that NetStringReceiver.MAX_LENGTH. Please Set this higher in the master.cfg")
         f.seek(0, 0)
         try:
             p.feed(f.read())
@@ -150,7 +159,7 @@ class Try_Jobdir(TryBase):
             raise BadJobfile("unable to parse netstrings")
         if not p.strings:
             raise BadJobfile("could not find any complete netstrings")
-        ver = p.strings.pop(0)
+        ver = bytes2unicode(p.strings.pop(0))
 
         v1_keys = ['jobid', 'branch', 'baserev', 'patch_level', 'patch_body']
         v2_keys = v1_keys + ['repository', 'project']
@@ -163,7 +172,7 @@ class Try_Jobdir(TryBase):
 
         def extract_netstrings(p, keys):
             for i, key in enumerate(keys):
-                parsed_job[key] = p.strings[i]
+                parsed_job[key] = bytes2unicode(p.strings[i])
 
         def postprocess_parsed_job():
             # apply defaults and handle type casting
@@ -177,11 +186,13 @@ class Try_Jobdir(TryBase):
         if ver <= "4":
             i = int(ver) - 1
             extract_netstrings(p, keys[i])
-            parsed_job['builderNames'] = p.strings[len(keys[i]):]
+            parsed_job['builderNames'] = [bytes2unicode(s)
+                                          for s in p.strings[len(keys[i]):]]
             postprocess_parsed_job()
         elif ver == "5":
             try:
-                parsed_job = json.loads(p.strings[0])
+                data = bytes2unicode(p.strings[0])
+                parsed_job = json.loads(data)
             except ValueError:
                 raise BadJobfile("unable to parse JSON")
             postprocess_parsed_job()
@@ -220,12 +231,13 @@ class Try_Jobdir(TryBase):
                            patch_level=parsed_job['patch_level'],
                            patch_author=who,
                            patch_comment=comment,
-                           patch_subdir='',  # TODO: can't set this remotely - #1769
+                           # TODO: can't set this remotely - #1769
+                           patch_subdir='',
                            project=parsed_job['project'],
                            repository=parsed_job['repository'])
-        reason = u"'try' job"
+        reason = "'try' job"
         if parsed_job['who']:
-            reason += u" by user %s" % ascii2unicode(parsed_job['who'])
+            reason += " by user {}".format(bytes2unicode(parsed_job['who']))
         properties = parsed_job['properties']
         requested_props = Properties()
         requested_props.update(properties, "try build")
@@ -233,7 +245,7 @@ class Try_Jobdir(TryBase):
         return self.addBuildsetForSourceStamps(
             sourcestamps=[sourcestamp],
             reason=reason,
-            external_idstring=ascii2unicode(parsed_job['jobid']),
+            external_idstring=bytes2unicode(parsed_job['jobid']),
             builderNames=builderNames,
             properties=requested_props)
 
@@ -248,11 +260,11 @@ class RemoteBuildSetStatus(pb.Referenceable):
     @defer.inlineCallbacks
     def remote_getBuildRequests(self):
         brids = dict()
-        for builderid, brid in self.brids.iteritems():
+        for builderid, brid in self.brids.items():
             builderDict = yield self.master.data.get(('builders', builderid))
             brids[builderDict['name']] = brid
-        defer.returnValue([(n, RemoteBuildRequest(self.master, n, brid))
-                           for n, brid in brids.iteritems()])
+        return [(n, RemoteBuildRequest(self.master, n, brid))
+            for n, brid in brids.items()]
 
 
 class RemoteBuildRequest(pb.Referenceable):
@@ -280,10 +292,11 @@ class RemoteBuildRequest(pb.Referenceable):
                 return
             reportedBuilds.add(msg['buildid'])
             return subscriber.callRemote('newbuild',
-                                         RemoteBuild(self.master, msg, self.builderName),
+                                         RemoteBuild(
+                                             self.master, msg, self.builderName),
                                          self.builderName)
-        self.consumer = yield self.master.data.startConsuming(
-            gotBuild, {}, ('builders', builderId, 'builds'))
+        self.consumer = yield self.master.mq.startConsuming(
+            gotBuild, ('builders', str(builderId), 'builds', None, None))
         subscriber.notifyOnDisconnect(lambda _:
                                       self.remote_unsubscribe(subscriber))
 
@@ -291,10 +304,11 @@ class RemoteBuildRequest(pb.Referenceable):
         builds = yield self.master.data.get(('buildrequests', self.brid, 'builds'))
         for build in builds:
             if build['buildid'] in reportedBuilds:
-                return
+                continue
             reportedBuilds.add(build['buildid'])
             yield subscriber.callRemote('newbuild',
-                                        RemoteBuild(self.master, build, self.builderName),
+                                        RemoteBuild(
+                                            self.master, build, self.builderName),
                                         self.builderName)
 
     def remote_unsubscribe(self, subscriber):
@@ -315,15 +329,16 @@ class RemoteBuild(pb.Referenceable):
     def remote_subscribe(self, subscriber, interval):
         # subscribe to any new steps..
         def stepChanged(key, msg):
+            log.msg("SC")
             if key[-1] == 'started':
                 return subscriber.callRemote('stepStarted',
                                              self.builderName, self, msg['name'], None)
             elif key[-1] == 'finished':
                 return subscriber.callRemote('stepFinished',
                                              self.builderName, self, msg['name'], None, msg['results'])
-        self.consumer = yield self.master.data.startConsuming(
-            stepChanged, {},
-            ('builds', self.builddict['buildid'], 'steps'))
+        self.consumer = yield self.master.mq.startConsuming(
+            stepChanged,
+            ('builds', str(self.builddict['buildid']), 'steps', None, None))
         subscriber.notifyOnDisconnect(lambda _:
                                       self.remote_unsubscribe(subscriber))
 
@@ -337,27 +352,28 @@ class RemoteBuild(pb.Referenceable):
         d = defer.Deferred()
 
         def buildEvent(key, msg):
+            log.msg("BE")
             if key[-1] == 'finished':
                 d.callback(None)
-        consumer = yield self.master.data.startConsuming(
-            buildEvent, {},
-            ('builds', self.builddict['buildid']))
+        consumer = yield self.master.mq.startConsuming(
+            buildEvent,
+            ('builds', str(self.builddict['buildid']), None))
 
         yield d  # wait for event
         consumer.stopConsuming()
-        defer.returnValue(self)  # callers expect result=self
+        return self  # callers expect result=self
 
     @defer.inlineCallbacks
     def remote_getResults(self):
         buildid = self.builddict['buildid']
         builddict = yield self.master.data.get(('builds', buildid))
-        defer.returnValue(builddict['results'])
+        return builddict['results']
 
     @defer.inlineCallbacks
     def remote_getText(self):
         buildid = self.builddict['buildid']
         builddict = yield self.master.data.get(('builds', buildid))
-        defer.returnValue([builddict['state_string']])
+        return [builddict['state_string']]
 
 
 class Try_Userpass_Perspective(pbutil.NewCredPerspective):
@@ -368,22 +384,23 @@ class Try_Userpass_Perspective(pbutil.NewCredPerspective):
 
     @defer.inlineCallbacks
     def perspective_try(self, branch, revision, patch, repository, project,
-                        builderNames, who="", comment="", properties={}):
+                        builderNames, who="", comment="", properties=None):
         log.msg("user %s requesting build on builders %s" % (self.username,
                                                              builderNames))
-
+        if properties is None:
+            properties = {}
         # build the intersection of the request and our configured list
         builderNames = self.scheduler.filterBuilderList(builderNames)
         if not builderNames:
             return
 
-        reason = u"'try' job"
+        reason = "'try' job"
 
         if who:
-            reason += u" by user %s" % ascii2unicode(who)
+            reason += " by user {}".format(bytes2unicode(who))
 
         if comment:
-            reason += u" (%s)" % ascii2unicode(comment)
+            reason += " ({})".format(bytes2unicode(comment))
 
         sourcestamp = dict(
             branch=branch, revision=revision, repository=repository,
@@ -400,7 +417,7 @@ class Try_Userpass_Perspective(pbutil.NewCredPerspective):
 
         # return a remotely-usable BuildSetStatus object
         bss = RemoteBuildSetStatus(self.scheduler.master, bsid, brids)
-        defer.returnValue(bss)
+        return bss
 
     def perspective_getAvailableBuilderNames(self):
         # Return a list of builder names that are configured
@@ -413,28 +430,32 @@ class Try_Userpass_Perspective(pbutil.NewCredPerspective):
 class Try_Userpass(TryBase):
     compare_attrs = ('name', 'builderNames', 'port', 'userpass', 'properties')
 
-    def __init__(self, name, builderNames, port, userpass,
-                 properties={}):
-        TryBase.__init__(self, name=name, builderNames=builderNames,
-                         properties=properties)
+    def __init__(self, name, builderNames, port, userpass, **kwargs):
+        super().__init__(name, builderNames, **kwargs)
         self.port = port
         self.userpass = userpass
         self.registrations = []
 
     @defer.inlineCallbacks
     def activate(self):
-        yield TryBase.activate(self)
+        yield super().activate()
+
+        if not self.enabled:
+            return
 
         # register each user/passwd with the pbmanager
         def factory(mind, username):
             return Try_Userpass_Perspective(self, username)
         for user, passwd in self.userpass:
-            self.registrations.append(
-                self.master.pbmanager.register(
-                    self.port, user, passwd, factory))
+            reg = yield self.master.pbmanager.register(self.port, user, passwd, factory)
+            self.registrations.append(reg)
 
     @defer.inlineCallbacks
     def deactivate(self):
-        yield TryBase.deactivate(self)
+        yield super().deactivate()
+
+        if not self.enabled:
+            return
+
         yield defer.gatherResults(
             [reg.unregister() for reg in self.registrations])

@@ -1,3 +1,4 @@
+# coding: utf-8
 # This file is part of Buildbot.  Buildbot is free software: you can
 # redistribute it and/or modify it under the terms of the GNU General Public
 # License as published by the Free Software Foundation, version 2.
@@ -13,247 +14,198 @@
 #
 # Copyright Buildbot Team Members
 
-import mock
 import os
 import signal
 
-from buildbot import config
-from buildbot import master
-from buildbot import monkeypatches
-from buildbot.changes.changes import Change
-from buildbot.db import exceptions
-from buildbot.test.fake import fakedata
-from buildbot.test.fake import fakedb
-from buildbot.test.fake import fakemq
-from buildbot.test.util import compat
-from buildbot.test.util import dirs
-from buildbot.test.util import logging
+import mock
+
 from twisted.internet import defer
 from twisted.internet import reactor
 from twisted.python import log
 from twisted.trial import unittest
+from zope.interface import implementer
+
+from buildbot import config
+from buildbot import master
+from buildbot import monkeypatches
+from buildbot.db import exceptions
+from buildbot.interfaces import IConfigLoader
+from buildbot.test.fake import fakedata
+from buildbot.test.fake import fakedb
+from buildbot.test.fake import fakemq
+from buildbot.test.fake.botmaster import FakeBotMaster
+from buildbot.test.util import dirs
+from buildbot.test.util import logging
+from buildbot.test.util.misc import TestReactorMixin
 
 
-class OldTriggeringMethods(unittest.TestCase):
+@implementer(IConfigLoader)
+class FailingLoader:
 
+    def loadConfig(self):
+        config.error('oh noes')
+
+
+@implementer(IConfigLoader)
+class DefaultLoader:
+
+    def loadConfig(self):
+        return config.MasterConfig()
+
+
+class InitTests(unittest.SynchronousTestCase):
+
+    def test_configfile_configloader_conflict(self):
+        """
+        If both configfile and config_loader are specified, a configuration
+        error is raised.
+        """
+        with self.assertRaises(config.ConfigErrors):
+            master.BuildMaster(".", "master.cfg",
+                               reactor=reactor, config_loader=DefaultLoader())
+
+    def test_configfile_default(self):
+        """
+        If neither configfile nor config_loader are specified, The default config_loader is a `FileLoader` pointing at `"master.cfg"`.
+        """
+        m = master.BuildMaster(".", reactor=reactor)
+        self.assertEqual(m.config_loader, config.FileLoader(".", "master.cfg"))
+
+
+class StartupAndReconfig(dirs.DirsMixin, logging.LoggingMixin,
+                         TestReactorMixin, unittest.TestCase):
+
+    @defer.inlineCallbacks
     def setUp(self):
-        self.patch(master.BuildMaster, 'create_child_services',
-                   lambda self: None)
-        self.master = master.BuildMaster(basedir=None)
-
-        self.master.data = fakedata.FakeDataConnector(self.master, self)
-        self.master.db = fakedb.FakeDBConnector(self.master, self)
-        self.master.db.insertTestData([
-            fakedb.Change(changeid=1, author='this is a test'),
-        ])
-
-        self.fake_Change = mock.Mock(name='fake_Change')
-
-        def fromChdict(master, chdict):
-            if chdict['author'] != 'this is a test':
-                raise AssertionError("did not get expected chdict")
-            return defer.succeed(self.fake_Change)
-        self.patch(Change, 'fromChdict', staticmethod(fromChdict))
-
-    def do_test_addChange_args(self, args=(), kwargs={}, exp_data_kwargs={}):
-        # add default arguments
-        default_data_kwargs = {
-            'author': None,
-            'branch': None,
-            'category': None,
-            'codebase': None,
-            'comments': None,
-            'files': None,
-            'project': '',
-            'properties': {},
-            'repository': '',
-            'revision': None,
-            'revlink': '',
-            'src': None,
-            'when_timestamp': None,
-        }
-        default_data_kwargs.update(exp_data_kwargs)
-        exp_data_kwargs = default_data_kwargs
-
-        d = self.master.addChange(*args, **kwargs)
-
-        @d.addCallback
-        def check(change):
-            self.assertIdentical(change, self.fake_Change)
-            self.assertEqual(self.master.data.updates.changesAdded,
-                             [exp_data_kwargs])
-        return d
-
-    def test_addChange_args_author(self):
-        # who should come through as author
-        return self.do_test_addChange_args(
-            kwargs=dict(who='me'),
-            exp_data_kwargs=dict(author='me'))
-
-    def test_addChange_args_when(self):
-        # when should come through as when_timestamp, as a datetime
-        return self.do_test_addChange_args(
-            kwargs=dict(when=892293875),
-            exp_data_kwargs=dict(when_timestamp=892293875))
-
-    def test_addChange_args_properties(self):
-        # properties should not be qualified with a source
-        return self.do_test_addChange_args(
-            kwargs=dict(properties={'a': 'b'}),
-            exp_data_kwargs=dict(properties={u'a': u'b'}))
-
-    def test_addChange_args_properties_tuple(self):
-        # properties should not be qualified with a source
-        return self.do_test_addChange_args(
-            kwargs=dict(properties={'a': ('b', 'Change')}),
-            exp_data_kwargs=dict(properties={'a': ('b', 'Change')}))
-
-    def test_addChange_args_positional(self):
-        # master.addChange can take author, files, comments as positional
-        # arguments
-        return self.do_test_addChange_args(
-            args=('me', ['a'], 'com'),
-            exp_data_kwargs=dict(author='me', files=['a'], comments='com'))
-
-
-class StartupAndReconfig(dirs.DirsMixin, logging.LoggingMixin, unittest.TestCase):
-
-    def setUp(self):
+        self.setUpTestReactor()
         self.setUpLogging()
         self.basedir = os.path.abspath('basedir')
-        d = self.setUpDirs(self.basedir)
+        yield self.setUpDirs(self.basedir)
 
-        @d.addCallback
-        def make_master(_):
-            # don't create child services
-            self.patch(master.BuildMaster, 'create_child_services',
-                       lambda self: None)
+        # don't create child services
+        self.patch(master.BuildMaster, 'create_child_services',
+                   lambda self: None)
 
-            # patch out a few other annoying things the master likes to do
-            self.patch(monkeypatches, 'patch_all', lambda: None)
-            self.patch(signal, 'signal', lambda sig, hdlr: None)
-            self.patch(master, 'Status', lambda master: mock.Mock())  # XXX temporary
-            self.patch(config.MasterConfig, 'loadConfig',
-                       classmethod(lambda cls, b, f: cls()))
+        # patch out a few other annoying things the master likes to do
+        self.patch(monkeypatches, 'patch_all', lambda: None)
+        self.patch(signal, 'signal', lambda sig, hdlr: None)
+        # XXX temporary
+        self.patch(master, 'Status', lambda master: mock.Mock())
 
-            self.master = master.BuildMaster(self.basedir)
-            self.db = self.master.db = fakedb.FakeDBConnector(self.master, self)
-            self.mq = self.master.mq = fakemq.FakeMQConnector(self.master, self)
-            self.data = self.master.data = fakedata.FakeDataConnector(self.master, self)
-
-        return d
+        master.BuildMaster.masterHeartbeatService = mock.Mock()
+        self.master = master.BuildMaster(
+            self.basedir, reactor=self.reactor, config_loader=DefaultLoader())
+        self.master.sendBuildbotNetUsageData = mock.Mock()
+        self.master.botmaster = FakeBotMaster()
+        self.db = self.master.db = fakedb.FakeDBConnector(self)
+        yield self.db.setServiceParent(self.master)
+        self.mq = self.master.mq = fakemq.FakeMQConnector(self)
+        yield self.mq.setServiceParent(self.master)
+        self.data = self.master.data = fakedata.FakeDataConnector(
+            self.master, self)
+        yield self.data.setServiceParent(self.master)
 
     def tearDown(self):
         return self.tearDownDirs()
 
-    def make_reactor(self):
-        r = mock.Mock()
-        r.callWhenRunning = reactor.callWhenRunning
-        return r
-
-    def patch_loadConfig_fail(self):
-        @classmethod
-        def loadConfig(cls, b, f):
-            config.error('oh noes')
-        self.patch(config.MasterConfig, 'loadConfig', loadConfig)
-
     # tests
+    @defer.inlineCallbacks
     def test_startup_bad_config(self):
-        reactor = self.make_reactor()
-        self.patch_loadConfig_fail()
+        self.master.config_loader = FailingLoader()
 
-        d = self.master.startService(_reactor=reactor)
+        yield self.master.startService()
 
-        @d.addCallback
-        def check(_):
-            reactor.stop.assert_called_with()
-            self.assertLogged("oh noes")
-        return d
+        self.assertTrue(self.reactor.stop_called)
+        self.assertLogged("oh noes")
+        self.assertLogged("BuildMaster startup failed")
 
+    @defer.inlineCallbacks
     def test_startup_db_not_ready(self):
-        reactor = self.make_reactor()
-
         def db_setup():
             log.msg("GOT HERE")
             raise exceptions.DatabaseNotReadyError()
         self.db.setup = db_setup
 
-        d = self.master.startService(_reactor=reactor)
+        yield self.master.startService()
 
-        @d.addCallback
-        def check(_):
-            reactor.stop.assert_called_with()
-            self.assertLogged("GOT HERE")
-        return d
+        self.assertTrue(self.reactor.stop_called)
+        self.assertLogged("GOT HERE")
+        self.assertLogged("BuildMaster startup failed")
 
-    @compat.usesFlushLoggedErrors
+    @defer.inlineCallbacks
     def test_startup_error(self):
-        reactor = self.make_reactor()
-
         def db_setup():
             raise RuntimeError("oh noes")
         self.db.setup = db_setup
 
-        d = self.master.startService(_reactor=reactor)
+        yield self.master.startService()
 
-        @d.addCallback
-        def check(_):
-            reactor.stop.assert_called_with()
-            self.assertEqual(len(self.flushLoggedErrors(RuntimeError)), 1)
-        return d
+        self.assertTrue(self.reactor.stop_called)
+        self.assertEqual(len(self.flushLoggedErrors(RuntimeError)), 1)
+        self.assertLogged("BuildMaster startup failed")
 
+    @defer.inlineCallbacks
     def test_startup_ok(self):
-        reactor = self.make_reactor()
+        yield self.master.startService()
 
-        d = self.master.startService(_reactor=reactor)
+        self.assertTrue(self.master.data.updates.thisMasterActive)
+        d = self.master.stopService()
+        self.assertTrue(d.called)
+        self.assertFalse(self.reactor.stop_called)
+        self.assertLogged("BuildMaster is running")
 
-        @d.addCallback
-        def check_started(_):
-            self.assertTrue(self.master.data.updates.thisMasterActive)
-        d.addCallback(lambda _: self.master.stopService())
+        # check started/stopped messages
+        self.assertFalse(self.master.data.updates.thisMasterActive)
 
-        @d.addCallback
-        def check(_):
-            self.failIf(reactor.stop.called)
-            self.assertLogged("BuildMaster is running")
+    @defer.inlineCallbacks
+    def test_startup_ok_waitforshutdown(self):
+        yield self.master.startService()
 
-            # check started/stopped messages
-            self.assertFalse(self.master.data.updates.thisMasterActive)
-        return d
+        self.assertTrue(self.master.data.updates.thisMasterActive)
+        # use fakebotmaster shutdown delaying
+        self.master.botmaster.delayShutdown = True
+        d = self.master.stopService()
 
+        self.assertFalse(d.called)
+        self.master.botmaster.shutdownDeferred.callback(None)
+        self.assertTrue(d.called)
+
+        self.assertFalse(self.reactor.stop_called)
+        self.assertLogged("BuildMaster is running")
+
+        # check started/stopped messages
+        self.assertFalse(self.master.data.updates.thisMasterActive)
+
+    @defer.inlineCallbacks
     def test_reconfig(self):
-        reactor = self.make_reactor()
         self.master.reconfigServiceWithBuildbotConfig = mock.Mock(
             side_effect=lambda n: defer.succeed(None))
-
-        d = self.master.startService(_reactor=reactor)
-        d.addCallback(lambda _: self.master.reconfig())
-        d.addCallback(lambda _: self.master.stopService())
-
-        @d.addCallback
-        def check(_):
-            self.master.reconfigServiceWithBuildbotConfig.assert_called_with(mock.ANY)
-        return d
+        self.master.masterHeartbeatService = mock.Mock()
+        yield self.master.startService()
+        yield self.master.reconfig()
+        yield self.master.stopService()
+        self.master.reconfigServiceWithBuildbotConfig.assert_called_with(
+            mock.ANY)
 
     @defer.inlineCallbacks
     def test_reconfig_bad_config(self):
-        reactor = self.make_reactor()
         self.master.reconfigService = mock.Mock(
             side_effect=lambda n: defer.succeed(None))
 
-        yield self.master.startService(_reactor=reactor)
+        self.master.masterHeartbeatService = mock.Mock()
+        yield self.master.startService()
 
         # reset, since startService called reconfigService
         self.master.reconfigService.reset_mock()
 
         # reconfig, with a failure
-        self.patch_loadConfig_fail()
+        self.master.config_loader = FailingLoader()
         yield self.master.reconfig()
 
         self.master.stopService()
 
         self.assertLogged("reconfig aborted without")
-        self.failIf(self.master.reconfigService.called)
+        self.assertFalse(self.master.reconfigService.called)
 
     @defer.inlineCallbacks
     def test_reconfigService_db_url_changed(self):
@@ -264,5 +216,5 @@ class StartupAndReconfig(dirs.DirsMixin, logging.LoggingMixin, unittest.TestCase
         new = config.MasterConfig()
         new.db['db_url'] = 'bbbb'
 
-        self.assertRaises(config.ConfigErrors, lambda:
-                          self.master.reconfigServiceWithBuildbotConfig(new))
+        with self.assertRaises(config.ConfigErrors):
+            self.master.reconfigServiceWithBuildbotConfig(new)

@@ -13,12 +13,32 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.data import base
-from buildbot.data import types
 from twisted.internet import defer
 
+from buildbot.data import base
+from buildbot.data import types
+from buildbot.data.resultspec import ResultSpec
 
-class Db2DataMixin(object):
+
+class Db2DataMixin:
+
+    def _generate_filtered_properties(self, props, filters):
+        """
+        This method returns Build's properties according to property filters.
+
+        .. seealso::
+
+            `Official Documentation <http://docs.buildbot.net/latest/developer/rtype-build.html>`_
+
+        :param props: The Build's properties as a dict (from db)
+        :param filters: Desired properties keys as a list (from API URI)
+
+        """
+        # by default none properties are returned
+        if props and filters:  # pragma: no cover
+            return (props
+                    if '*' in filters
+                    else dict(((k, v) for k, v in props.items() if k in filters)))
 
     def db2data(self, dbdict):
         data = {
@@ -26,23 +46,37 @@ class Db2DataMixin(object):
             'number': dbdict['number'],
             'builderid': dbdict['builderid'],
             'buildrequestid': dbdict['buildrequestid'],
-            'buildslaveid': dbdict['buildslaveid'],
+            'workerid': dbdict['workerid'],
             'masterid': dbdict['masterid'],
             'started_at': dbdict['started_at'],
             'complete_at': dbdict['complete_at'],
             'complete': dbdict['complete_at'] is not None,
             'state_string': dbdict['state_string'],
             'results': dbdict['results'],
+            'properties': {}
         }
         return defer.succeed(data)
+    fieldMapping = {
+        'buildid': 'builds.id',
+        'number': 'builds.number',
+        'builderid': 'builds.builderid',
+        'buildrequestid': 'builds.buildrequestid',
+        'workerid': 'builds.workerid',
+        'masterid': 'builds.masterid',
+        'started_at': 'builds.started_at',
+        'complete_at': 'builds.complete_at',
+        'state_string': 'builds.state_string',
+        'results': 'builds.results',
+    }
 
 
-class BuildEndpoint(Db2DataMixin, base.Endpoint):
+class BuildEndpoint(Db2DataMixin, base.BuildNestingMixin, base.Endpoint):
 
     isCollection = False
     pathPatterns = """
         /builds/n:buildid
         /builders/n:builderid/builds/n:number
+        /builders/i:buildername/builds/n:number
     """
 
     @defer.inlineCallbacks
@@ -50,60 +84,103 @@ class BuildEndpoint(Db2DataMixin, base.Endpoint):
         if 'buildid' in kwargs:
             dbdict = yield self.master.db.builds.getBuild(kwargs['buildid'])
         else:
+            bldr = yield self.getBuilderId(kwargs)
+            if bldr is None:
+                return
+            num = kwargs['number']
+            dbdict = yield self.master.db.builds.getBuildByNumber(bldr, num)
+
+        data = yield self.db2data(dbdict) if dbdict else None
+        # In some cases, data could be None
+        if data:
+            filters = resultSpec.popProperties() if hasattr(
+                resultSpec, 'popProperties') else []
+            # Avoid to request DB for Build's properties if not specified
+            if filters:  # pragma: no cover
+                try:
+                    props = yield self.master.db.builds.getBuildProperties(data['buildid'])
+                except (KeyError, TypeError):
+                    props = {}
+                filtered_properties = self._generate_filtered_properties(
+                    props, filters)
+                if filtered_properties:
+                    data['properties'] = filtered_properties
+        return data
+
+    @defer.inlineCallbacks
+    def actionStop(self, args, kwargs):
+        buildid = kwargs.get('buildid')
+        if buildid is None:
             bldr = kwargs['builderid']
             num = kwargs['number']
             dbdict = yield self.master.db.builds.getBuildByNumber(bldr, num)
-        defer.returnValue((yield self.db2data(dbdict))
-                          if dbdict else None)
+            buildid = dbdict['id']
+        self.master.mq.produce(("control", "builds",
+                                str(buildid), 'stop'),
+                               dict(reason=kwargs.get('reason', args.get('reason', 'no reason'))))
 
-    def startConsuming(self, callback, options, kwargs):
-        builderid = kwargs.get('builderid')
-        number = kwargs.get('number')
-        buildid = kwargs.get('buildid')
-        if builderid is not None:
-            return self.master.mq.startConsuming(callback,
-                                                 ('builders', str(builderid), 'builds', str(number), None))
-        else:
-            return self.master.mq.startConsuming(callback,
-                                                 ('builds', str(buildid), None))
+    @defer.inlineCallbacks
+    def actionRebuild(self, args, kwargs):
+        # we use the self.get and not self.data.get to be able to support all
+        # the pathPatterns of this endpoint
+        build = yield self.get(ResultSpec(), kwargs)
+        buildrequest = yield self.master.data.get(('buildrequests', build['buildrequestid']))
+        res = yield self.master.data.updates.rebuildBuildrequest(buildrequest)
+        return res
 
 
-class BuildsEndpoint(Db2DataMixin, base.Endpoint):
+class BuildsEndpoint(Db2DataMixin, base.BuildNestingMixin, base.Endpoint):
 
     isCollection = True
     pathPatterns = """
         /builds
         /builders/n:builderid/builds
+        /builders/i:buildername/builds
         /buildrequests/n:buildrequestid/builds
+        /changes/n:changeid/builds
+        /workers/n:workerid/builds
     """
     rootLinkName = 'builds'
 
     @defer.inlineCallbacks
     def get(self, resultSpec, kwargs):
-        # following returns None if no filter
-        # true or false, if there is a complete filter
-        complete = resultSpec.popBooleanFilter("complete")
-        builds = yield self.master.db.builds.getBuilds(
-            builderid=kwargs.get('builderid'),
-            buildrequestid=kwargs.get('buildrequestid'),
-            complete=complete)
-        defer.returnValue(
-            [(yield self.db2data(dbdict)) for dbdict in builds])
-
-    def startConsuming(self, callback, options, kwargs):
-        builderid = kwargs.get('builderid')
-        buildrequestid = kwargs.get('buildrequestid')
-        if builderid is not None:
-            return self.master.mq.startConsuming(
-                callback,
-                ('builders', str(builderid), 'builds', None, None))
-        elif buildrequestid is not None:
-            # XXX these messages are never produced
-            return self.master.mq.startConsuming(callback,
-                                                 ('buildrequests', str(buildrequestid), 'builds', None))
+        changeid = kwargs.get('changeid')
+        if changeid is not None:
+            builds = yield self.master.db.builds.getBuildsForChange(changeid)
         else:
-            return self.master.mq.startConsuming(callback,
-                                                 ('builds', None, None, None))
+            # following returns None if no filter
+            # true or false, if there is a complete filter
+            builderid = None
+            if 'builderid' in kwargs or 'buildername' in kwargs:
+                builderid = yield self.getBuilderId(kwargs)
+                if builderid is None:
+                    return []
+            complete = resultSpec.popBooleanFilter("complete")
+            buildrequestid = resultSpec.popIntegerFilter("buildrequestid")
+            resultSpec.fieldMapping = self.fieldMapping
+            builds = yield self.master.db.builds.getBuilds(
+                builderid=builderid,
+                buildrequestid=kwargs.get('buildrequestid', buildrequestid),
+                workerid=kwargs.get('workerid'),
+                complete=complete,
+                resultSpec=resultSpec)
+
+        # returns properties' list
+        filters = resultSpec.popProperties()
+
+        buildscol = []
+        for b in builds:
+            data = yield self.db2data(b)
+            # Avoid to request DB for Build's properties if not specified
+            if filters:  # pragma: no cover
+                props = yield self.master.db.builds.getBuildProperties(b['id'])
+                filtered_properties = self._generate_filtered_properties(
+                    props, filters)
+                if filtered_properties:
+                    data['properties'] = filtered_properties
+
+            buildscol.append(data)
+        return buildscol
 
 
 class Build(base.ResourceType):
@@ -111,10 +188,11 @@ class Build(base.ResourceType):
     name = "build"
     plural = "builds"
     endpoints = [BuildEndpoint, BuildsEndpoint]
-    keyFields = ['builderid', 'buildid']
+    keyFields = ['builderid', 'buildid', 'workerid']
     eventPathPatterns = """
         /builders/:builderid/builds/:number
         /builds/:buildid
+        /workers/:workerid/builds/:buildid
     """
 
     class EntityType(types.Entity):
@@ -122,13 +200,14 @@ class Build(base.ResourceType):
         number = types.Integer()
         builderid = types.Integer()
         buildrequestid = types.Integer()
-        buildslaveid = types.Integer()
+        workerid = types.Integer()
         masterid = types.Integer()
         started_at = types.DateTime()
         complete = types.Boolean()
         complete_at = types.NoneOk(types.DateTime())
         results = types.NoneOk(types.Integer())
         state_string = types.String()
+        properties = types.NoneOk(types.SourcedProperties())
     entityType = EntityType(name)
 
     @defer.inlineCallbacks
@@ -139,17 +218,18 @@ class Build(base.ResourceType):
 
     @base.updateMethod
     @defer.inlineCallbacks
-    def newBuild(self, builderid, buildrequestid, buildslaveid):
+    def addBuild(self, builderid, buildrequestid, workerid):
         res = yield self.master.db.builds.addBuild(
             builderid=builderid,
             buildrequestid=buildrequestid,
-            buildslaveid=buildslaveid,
+            workerid=workerid,
             masterid=self.master.masterid,
-            state_string=u'created')
-        if res is not None:
-            _id, number = res
-            yield self.generateEvent(_id, "new")
-        defer.returnValue(res)
+            state_string='created')
+        return res
+
+    @base.updateMethod
+    def generateNewBuildEvent(self, buildid):
+        return self.generateEvent(buildid, "new")
 
     @base.updateMethod
     @defer.inlineCallbacks
@@ -157,7 +237,7 @@ class Build(base.ResourceType):
         res = yield self.master.db.builds.setBuildStateString(
             buildid=buildid, state_string=state_string)
         yield self.generateEvent(buildid, "update")
-        defer.returnValue(res)
+        return res
 
     @base.updateMethod
     @defer.inlineCallbacks
@@ -165,4 +245,4 @@ class Build(base.ResourceType):
         res = yield self.master.db.builds.finishBuild(
             buildid=buildid, results=results)
         yield self.generateEvent(buildid, "finished")
-        defer.returnValue(res)
+        return res

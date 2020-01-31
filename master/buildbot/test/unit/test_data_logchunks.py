@@ -15,12 +15,13 @@
 
 import textwrap
 
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot.data import logchunks
 from buildbot.data import resultspec
 from buildbot.test.fake import fakedb
 from buildbot.test.util import endpoint
-from twisted.internet import defer
-from twisted.trial import unittest
 
 
 class LogChunkEndpointBase(endpoint.EndpointMixin, unittest.TestCase):
@@ -36,11 +37,11 @@ class LogChunkEndpointBase(endpoint.EndpointMixin, unittest.TestCase):
         self.setUpEndpoint()
         self.db.insertTestData([
             fakedb.Builder(id=77),
-            fakedb.Buildslave(id=13, name='sl'),
+            fakedb.Worker(id=13, name='wrk'),
             fakedb.Master(id=88),
             fakedb.Buildset(id=8822),
             fakedb.BuildRequest(id=82, buildsetid=8822),
-            fakedb.Build(id=13, builderid=77, masterid=88, buildslaveid=13,
+            fakedb.Build(id=13, builderid=77, masterid=88, workerid=13,
                          buildrequestid=82, number=3),
             fakedb.Step(id=50, buildid=13, number=9, name='make'),
             fakedb.Log(id=60, stepid=50, name='stdio', slug='stdio', type='s',
@@ -83,7 +84,7 @@ class LogChunkEndpointBase(endpoint.EndpointMixin, unittest.TestCase):
                          {'logid': logid, 'firstline': 0, 'content': expContent})
 
         # line-by-line
-        for i in range(len(expLines)):
+        for i, expLine in enumerate(expLines):
             logchunk = yield self.callGet(path,
                                           resultSpec=resultspec.ResultSpec(offset=i, limit=1))
             self.validateData(logchunk)
@@ -91,19 +92,19 @@ class LogChunkEndpointBase(endpoint.EndpointMixin, unittest.TestCase):
                              {'logid': logid, 'firstline': i, 'content': expLines[i] + '\n'})
 
         # half and half
-        mid = len(expLines) / 2
-        for f, l in (0, mid), (mid, len(expLines) - 1):
+        mid = int(len(expLines) / 2)
+        for f, length in (0, mid), (mid, len(expLines) - 1):
             logchunk = yield self.callGet(path,
-                                          resultSpec=resultspec.ResultSpec(offset=f, limit=l - f + 1))
+                                          resultSpec=resultspec.ResultSpec(offset=f, limit=length - f + 1))
             self.validateData(logchunk)
-            expContent = '\n'.join(expLines[f:l + 1]) + '\n'
+            expContent = '\n'.join(expLines[f:length + 1]) + '\n'
             self.assertEqual(logchunk,
                              {'logid': logid, 'firstline': f, 'content': expContent})
 
         # truncated at EOF
-        f, l = len(expLines) - 2, len(expLines) + 10
+        f, length = len(expLines) - 2, len(expLines) + 10
         logchunk = yield self.callGet(path,
-                                      resultSpec=resultspec.ResultSpec(offset=f, limit=l - f + 1))
+                                      resultSpec=resultspec.ResultSpec(offset=f, limit=length - f + 1))
         self.validateData(logchunk)
         expContent = '\n'.join(expLines[-2:]) + '\n'
         self.assertEqual(logchunk,
@@ -177,9 +178,9 @@ class RawLogChunkEndpoint(LogChunkEndpointBase):
     endpointname = "raw"
 
     def validateData(self, data):
-        self.assertIsInstance(data['raw'], unicode)
-        self.assertIsInstance(data['mime-type'], unicode)
-        self.assertIsInstance(data['filename'], unicode)
+        self.assertIsInstance(data['raw'], str)
+        self.assertIsInstance(data['mime-type'], str)
+        self.assertIsInstance(data['filename'], str)
 
     @defer.inlineCallbacks
     def do_test_chunks(self, path, logid, expLines):
@@ -187,11 +188,11 @@ class RawLogChunkEndpoint(LogChunkEndpointBase):
         logchunk = yield self.callGet(path)
         self.validateData(logchunk)
         if logid == 60:
-            expContent = u'\n'.join([line[1:] for line in expLines])
+            expContent = '\n'.join([line[1:] for line in expLines])
             expFilename = "stdio"
         else:
-            expContent = u'\n'.join(expLines) + '\n'
+            expContent = '\n'.join(expLines) + '\n'
             expFilename = "errors"
 
         self.assertEqual(logchunk,
-                         {'filename': expFilename, 'mime-type': u"text/plain", 'raw': expContent})
+                         {'filename': expFilename, 'mime-type': "text/plain", 'raw': expContent})

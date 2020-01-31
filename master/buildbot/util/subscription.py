@@ -13,15 +13,21 @@
 #
 # Copyright Buildbot Team Members
 
+
+from twisted.internet import defer
 from twisted.python import failure
 from twisted.python import log
 
+from buildbot.util import Notifier
 
-class SubscriptionPoint(object):
+
+class SubscriptionPoint:
 
     def __init__(self, name):
         self.name = name
         self.subscriptions = set()
+        self._unfinished_deliveries = []
+        self._unfinished_notifier = Notifier()
 
     def __str__(self):
         return "<SubscriptionPoint '%s'>" % self.name
@@ -32,18 +38,36 @@ class SubscriptionPoint(object):
         return sub
 
     def deliver(self, *args, **kwargs):
+        self._unfinished_deliveries.append(self)
         for sub in list(self.subscriptions):
             try:
-                sub.callback(*args, **kwargs)
+                d = sub.callback(*args, **kwargs)
+                if isinstance(d, defer.Deferred):
+                    self._unfinished_deliveries.append(d)
+                    d.addBoth(self._notify_delivery_finished, d)
+
             except Exception:
                 log.err(failure.Failure(),
                         'while invoking callback %s to %s' % (sub.callback, self))
 
+        self._notify_delivery_finished(None, self)
+
+    def waitForDeliveriesToFinish(self):
+        # returns a deferred
+        if not self._unfinished_deliveries:
+            return defer.succeed(None)
+        return self._unfinished_notifier.wait()
+
     def _unsubscribe(self, subscription):
         self.subscriptions.remove(subscription)
 
+    def _notify_delivery_finished(self, _, d):
+        self._unfinished_deliveries.remove(d)
+        if not self._unfinished_deliveries:
+            self._unfinished_notifier.notify(None)
 
-class Subscription(object):
+
+class Subscription:
 
     def __init__(self, subpt, callback):
         self.subpt = subpt

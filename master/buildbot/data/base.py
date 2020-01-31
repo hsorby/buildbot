@@ -13,15 +13,16 @@
 #
 # Copyright Buildbot Team Members
 
-import UserList
 import copy
 import re
+from collections import UserList
 
-from buildbot.data import exceptions
 from twisted.internet import defer
 
+from buildbot.data import exceptions
 
-class ResourceType(object):
+
+class ResourceType:
     name = None
     plural = None
     endpoints = []
@@ -48,8 +49,7 @@ class ResourceType(object):
 
     def getEndpoints(self):
         endpoints = self.endpoints[:]
-        for i in xrange(len(endpoints)):
-            ep = endpoints[i]
+        for i, ep in enumerate(endpoints):
             if not issubclass(ep, Endpoint):
                 raise TypeError("Not an Endpoint subclass")
             endpoints[i] = ep(self, self.master)
@@ -69,7 +69,7 @@ class ResourceType(object):
                 self.master.mq.produce(routingKey, msg)
 
 
-class Endpoint(object):
+class Endpoint:
     pathPatterns = ""
     rootLinkName = None
     isCollection = False
@@ -83,13 +83,17 @@ class Endpoint(object):
         raise NotImplementedError
 
     def control(self, action, args, kwargs):
-        raise exceptions.InvalidControlException
+        # we convert the action into a mixedCase method name
+        action_method = getattr(self, "action" + action.capitalize(), None)
+        if action_method is None:
+            raise exceptions.InvalidControlException("action: {} is not supported".format(action))
+        return action_method(args, kwargs)
 
-    def startConsuming(self, callback, options, kwargs):
-        raise NotImplementedError
+    def __repr__(self):
+        return "endpoint for " + self.pathPatterns
 
 
-class BuildNestingMixin(object):
+class BuildNestingMixin:
 
     """
     A mixin for methods to decipher the many ways a build, step, or log can be
@@ -101,51 +105,57 @@ class BuildNestingMixin(object):
         # need to look in the context of a step, specified by build or
         # builder or whatever
         if 'buildid' in kwargs:
-            defer.returnValue(kwargs['buildid'])
+            return kwargs['buildid']
         else:
+            builderid = yield self.getBuilderId(kwargs)
+            if builderid is None:
+                return
             build = yield self.master.db.builds.getBuildByNumber(
-                builderid=kwargs['builderid'],
+                builderid=builderid,
                 number=kwargs['build_number'])
             if not build:
                 return
-            defer.returnValue(build['id'])
+            return build['id']
 
     @defer.inlineCallbacks
     def getStepid(self, kwargs):
         if 'stepid' in kwargs:
-            defer.returnValue(kwargs['stepid'])
+            return kwargs['stepid']
         else:
             buildid = yield self.getBuildid(kwargs)
             if buildid is None:
                 return
 
             dbdict = yield self.master.db.steps.getStep(buildid=buildid,
-                                                        number=kwargs.get('step_number'),
+                                                        number=kwargs.get(
+                                                            'step_number'),
                                                         name=kwargs.get('step_name'))
             if not dbdict:
                 return
-            defer.returnValue(dbdict['id'])
+            return dbdict['id']
+
+    def getBuilderId(self, kwargs):
+        if 'buildername' in kwargs:
+            return self.master.db.builders.findBuilderId(kwargs['buildername'], autoCreate=False)
+        return defer.succeed(kwargs['builderid'])
 
 
-class ListResult(UserList.UserList):
+class ListResult(UserList):
 
     __slots__ = ['offset', 'total', 'limit']
 
-    # if set, this is the index in the overall results of the first element of
-    # this list
-    offset = None
-
-    # if set, this is the total number of results
-    total = None
-
-    # if set, this is the limit, either from the user or the implementation
-    limit = None
-
     def __init__(self, values,
                  offset=None, total=None, limit=None):
-        UserList.UserList.__init__(self, values)
+        super().__init__(values)
+
+        # if set, this is the index in the overall results of the first element of
+        # this list
         self.offset = offset
+
+        # if set, this is the total number of results
         self.total = total
+
+        # if set, this is the limit, either from the user or the implementation
         self.limit = limit
 
     def __repr__(self):
@@ -158,10 +168,9 @@ class ListResult(UserList.UserList):
                 and self.offset == other.offset \
                 and self.total == other.total \
                 and self.limit == other.limit
-        else:
-            return self.data == other \
-                and self.offset == self.limit is None \
-                and (self.total is None or self.total == len(other))
+        return self.data == other \
+            and self.offset == self.limit is None \
+            and (self.total is None or self.total == len(other))
 
     def __ne__(self, other):
         return not (self == other)

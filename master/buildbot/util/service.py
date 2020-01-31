@@ -1,4 +1,4 @@
-# This file is part of Buildbot.  Buildbot is free software: you can
+# This file is part of Buildbot. Buildbot is free software: you can
 # redistribute it and/or modify it under the terms of the GNU General Public
 # License as published by the Free Software Foundation, version 2.
 #
@@ -13,13 +13,19 @@
 #
 # Copyright Buildbot Team Members
 
+import hashlib
+
 from twisted.application import service
 from twisted.internet import defer
 from twisted.internet import task
 from twisted.python import log
+from twisted.python import reflect
+from twisted.python.reflect import accumulateClassList
 
 from buildbot import util
+from buildbot.util import bytes2unicode
 from buildbot.util import config
+from buildbot.util import unicode2bytes
 
 
 class ReconfigurableServiceMixin:
@@ -43,8 +49,222 @@ class ReconfigurableServiceMixin:
             yield svc.reconfigServiceWithBuildbotConfig(new_config)
 
 
-class ClusteredService(service.Service, util.ComparableMixin):
+# twisted 16's Service is now an new style class, better put everybody new style
+# to catch issues even on twisted < 16
+class AsyncService(service.Service):
 
+    @defer.inlineCallbacks
+    def setServiceParent(self, parent):
+        if self.parent is not None:
+            yield self.disownServiceParent()
+        parent = service.IServiceCollection(parent, parent)
+        self.parent = parent
+        yield self.parent.addService(self)
+
+    # We recurse over the parent services until we find a MasterService
+    @property
+    def master(self):
+        if self.parent is None:
+            return None
+        return self.parent.master
+
+
+class AsyncMultiService(AsyncService, service.MultiService):
+
+    def startService(self):
+        # Do NOT use super() here.
+        # The method resolution order would cause MultiService.startService() to
+        # be called which we explicitly want to override with this method.
+        service.Service.startService(self)
+        dl = []
+        # if a service attaches another service during the reconfiguration
+        # then the service will be started twice, so we don't use iter, but rather
+        # copy in a list
+        for svc in list(self):
+            # handle any deferreds, passing up errors and success
+            dl.append(defer.maybeDeferred(svc.startService))
+        return defer.gatherResults(dl, consumeErrors=True)
+
+    @defer.inlineCallbacks
+    def stopService(self):
+        # Do NOT use super() here.
+        # The method resolution order would cause MultiService.stopService() to
+        # be called which we explicitly want to override with this method.
+        service.Service.stopService(self)
+        services = list(self)
+        services.reverse()
+        dl = []
+        for svc in services:
+            if not isinstance(svc, SharedService):
+                dl.append(defer.maybeDeferred(svc.stopService))
+        # unlike MultiService, consume errors in each individual deferred, and
+        # pass the first error in a child service up to our caller
+        yield defer.gatherResults(dl, consumeErrors=True)
+        for svc in services:
+            if isinstance(svc, SharedService):
+                yield svc.stopService()
+
+    def addService(self, service):
+        if service.name is not None:
+            if service.name in self.namedServices:
+                raise RuntimeError("cannot have two services with same name"
+                                   " '%s'" % service.name)
+            self.namedServices[service.name] = service
+        self.services.append(service)
+        if self.running:
+            # It may be too late for that, but we will do our best
+            service.privilegedStartService()
+            return service.startService()
+        return defer.succeed(None)
+
+
+class MasterService(AsyncMultiService):
+    # master service is the service that stops the master property recursion
+
+    @property
+    def master(self):
+        return self
+
+
+class SharedService(AsyncMultiService):
+    """a service that is created only once per parameter set in a parent service"""
+
+    @classmethod
+    @defer.inlineCallbacks
+    def getService(cls, parent, *args, **kwargs):
+        name = cls.getName(*args, **kwargs)
+        if name in parent.namedServices:
+            return parent.namedServices[name]
+
+        instance = cls(*args, **kwargs)
+
+        # The class is not required to initialized its name
+        # but we use the name to identify the instance in the parent service
+        # so we force it with the name we used
+        instance.name = name
+        yield instance.setServiceParent(parent)
+
+        # we put the service on top of the list, so that it is stopped the last
+        # This make sense as the shared service is used as a dependency
+        # for other service
+        parent.services.remove(instance)
+        parent.services.insert(0, instance)
+        # hook the return value to the instance object
+        return instance
+
+    @classmethod
+    def getName(cls, *args, **kwargs):
+        _hash = hashlib.sha1()
+        for arg in args:
+            arg = unicode2bytes(str(arg))
+            _hash.update(arg)
+        for k, v in sorted(kwargs.items()):
+            k = unicode2bytes(str(k))
+            v = unicode2bytes(str(v))
+            _hash.update(k)
+            _hash.update(v)
+        return cls.__name__ + "_" + _hash.hexdigest()
+
+
+class BuildbotService(AsyncMultiService, config.ConfiguredMixin, util.ComparableMixin,
+                      ReconfigurableServiceMixin):
+    compare_attrs = ('name', '_config_args', '_config_kwargs')
+    name = None
+    configured = False
+    objectid = None
+
+    def __init__(self, *args, **kwargs):
+        name = kwargs.pop("name", None)
+        if name is not None:
+            self.name = bytes2unicode(name)
+        self.checkConfig(*args, **kwargs)
+        if self.name is None:
+            raise ValueError(
+                "%s: must pass a name to constructor" % type(self))
+        self._config_args = args
+        self._config_kwargs = kwargs
+        self.rendered = False
+        super().__init__()
+
+    def getConfigDict(self):
+        _type = type(self)
+        return {'name': self.name,
+                'class': _type.__module__ + "." + _type.__name__,
+                'args': self._config_args,
+                'kwargs': self._config_kwargs}
+
+    @defer.inlineCallbacks
+    def reconfigServiceWithSibling(self, sibling):
+        # only reconfigure if sibling is configured differently.
+        # sibling == self is using ComparableMixin's implementation
+        # only compare compare_attrs
+        if self.configured and sibling == self:
+            return None
+        self.configured = True
+        # render renderables in parallel
+        # Properties import to resolve cyclic import issue
+        from buildbot.process.properties import Properties
+        p = Properties()
+        p.master = self.master
+        # render renderables in parallel
+        secrets = []
+        kwargs = {}
+        accumulateClassList(self.__class__, 'secrets', secrets)
+        for k, v in sibling._config_kwargs.items():
+            if k in secrets:
+                # for non reconfigurable services, we force the attribute
+                v = yield p.render(v)
+                setattr(sibling, k, v)
+                setattr(self, k, v)
+            kwargs[k] = v
+
+        d = yield self.reconfigService(*sibling._config_args,
+                                       **kwargs)
+        return d
+
+    def configureService(self):
+        # reconfigServiceWithSibling with self, means first configuration
+        return self.reconfigServiceWithSibling(self)
+
+    @defer.inlineCallbacks
+    def startService(self):
+        if not self.configured:
+            try:
+                yield self.configureService()
+            except NotImplementedError:
+                pass
+        yield super().startService()
+
+    def checkConfig(self, *args, **kwargs):
+        return defer.succeed(True)
+
+    def reconfigService(self, name=None, *args, **kwargs):
+        return defer.succeed(None)
+
+    def renderSecrets(self, *args):
+        # Properties import to resolve cyclic import issue
+        from buildbot.process.properties import Properties
+        p = Properties()
+        p.master = self.master
+
+        if len(args) == 1:
+            return p.render(args[0])
+
+        return defer.gatherResults([p.render(s) for s in args], consumeErrors=True)
+
+
+class ClusteredBuildbotService(BuildbotService):
+
+    """
+    ClusteredBuildbotService-es are meant to be executed on a single
+    master only. When starting such a service, by means of "yield startService",
+    it will first try to claim it on the current master and:
+    - return without actually starting it
+      if it was already claimed by another master (self.active == False).
+      It will however keep trying to claim it, in case another master
+      stops, and takes the job back.
+    - return after it starts else.
+    """
     compare_attrs = ('name',)
 
     POLL_INTERVAL_SEC = 5 * 60  # 5 minutes
@@ -52,14 +272,13 @@ class ClusteredService(service.Service, util.ComparableMixin):
     serviceid = None
     active = False
 
-    def __init__(self, name):
-        # service.Service.__init__(self)  # there is none, oddly
-
-        name = util.ascii2unicode(name)
-        self.setName(name)
+    def __init__(self, *args, **kwargs):
 
         self.serviceid = None
         self.active = False
+        self._activityPollCall = None
+        self._activityPollDeferred = None
+        super().__init__(*args, **kwargs)
 
     # activity handling
 
@@ -71,7 +290,7 @@ class ClusteredService(service.Service, util.ComparableMixin):
         return defer.succeed(None)
 
     def deactivate(self):
-        # to be overriden by subclasses
+        # to be overridden by subclasses
         # will run when this instance loses its chosen status
         return defer.succeed(None)
 
@@ -79,7 +298,7 @@ class ClusteredService(service.Service, util.ComparableMixin):
 
     def _getServiceId(self):
         # retrieve the id for this service; we assume that, once we have a valid id,
-        # the id doesnt change. This may return a Deferred.
+        # the id doesn't change. This may return a Deferred.
         raise NotImplementedError
 
     def _claimService(self):
@@ -96,40 +315,38 @@ class ClusteredService(service.Service, util.ComparableMixin):
 
     # default implementation to delegate to the above methods
 
+    @defer.inlineCallbacks
     def startService(self):
         # subclasses should override startService only to perform actions that should
-        # run on all instances, even if they never get activated on this master.
-
-        service.Service.startService(self)
+        # run on all instances, even if they never get activated on this
+        # master.
+        yield super().startService()
+        self._startServiceDeferred = defer.Deferred()
         self._startActivityPolling()
+        yield self._startServiceDeferred
 
+    @defer.inlineCallbacks
     def stopService(self):
         # subclasses should override stopService only to perform actions that should
-        # run on all instances, even if they never get activated on this master.
+        # run on all instances, even if they never get activated on this
+        # master.
 
         self._stopActivityPolling()
 
         # need to wait for prior activations to finish
         if self._activityPollDeferred:
-            d = self._activityPollDeferred
-        else:
-            d = defer.succeed(None)
+            yield self._activityPollDeferred
 
-        @d.addCallback
-        def deactivate_if_needed(_):
-            if self.active:
-                self.active = False
+        if self.active:
+            self.active = False
 
-                d = defer.maybeDeferred(self.deactivate)
-                # no errback here: skip the "unclaim" if the deactivation is uncertain
+            try:
+                yield self.deactivate()
+                yield self._unclaimService()
+            except Exception as e:
+                log.err(e, _why="Caught exception while deactivating ClusteredService(%s)" % self.name)
 
-                d.addCallback(lambda _: defer.maybeDeferred(self._unclaimService))
-
-                d.addErrback(log.err, _why="Caught exception while deactivating ClusteredService(%s)" % self.name)
-                return d
-
-        d.addCallback(lambda _: service.Service.stopService(self))
-        return d
+        yield super().stopService()
 
     def _startActivityPolling(self):
         self._activityPollCall = task.LoopingCall(self._activityPoll)
@@ -147,6 +364,12 @@ class ClusteredService(service.Service, util.ComparableMixin):
         if self._activityPollCall:
             self._activityPollCall.stop()
             self._activityPollCall = None
+            return self._activityPollDeferred
+
+    def _callbackStartServiceDeferred(self):
+        if self._startServiceDeferred is not None:
+            self._startServiceDeferred.callback(None)
+            self._startServiceDeferred = None
 
     @defer.inlineCallbacks
     def _activityPoll(self):
@@ -161,113 +384,141 @@ class ClusteredService(service.Service, util.ComparableMixin):
             try:
                 claimed = yield self._claimService()
             except Exception:
-                log.err(_why='WARNING: ClusteredService(%s) got exception while trying to claim' % self.name)
+                log.err(
+                    _why='WARNING: ClusteredService(%s) got exception while trying to claim' % self.name)
                 return
 
             if not claimed:
+                # this master is not responsible
+                # for this service, we callback for StartService
+                # if it was not callback-ed already,
+                # and keep polling to take back the service
+                # if another one lost it
+                self._callbackStartServiceDeferred()
                 return
 
-            self._stopActivityPolling()
-            self.active = True
             try:
+                # this master is responsible for this service
+                # we activate it
+                self.active = True
                 yield self.activate()
             except Exception:
                 # this service is half-active, and noted as such in the db..
-                log.err(_why='WARNING: ClusteredService(%s) is only partially active' % self.name)
-
+                log.err(
+                    _why='WARNING: ClusteredService(%s) is only partially active' % self.name)
+            finally:
+                # cannot wait for its deactivation
+                # with yield self._stopActivityPolling
+                # as we're currently executing the
+                # _activityPollCall callback
+                # we just call it without waiting its stop
+                # (that may open race conditions)
+                self._stopActivityPolling()
+                self._callbackStartServiceDeferred()
         except Exception:
-            # don't pass exceptions into LoopingCall, which can cause it to fail
-            log.err(_why='WARNING: ClusteredService(%s) failed during activity poll' % self.name)
+            # don't pass exceptions into LoopingCall, which can cause it to
+            # fail
+            log.err(
+                _why='WARNING: ClusteredService(%s) failed during activity poll' % self.name)
 
 
-class AsyncService(service.Service):
-
-    def setServiceParent(self, parent):
-        if self.parent is not None:
-            self.disownServiceParent()
-        parent = service.IServiceCollection(parent, parent)
-        self.parent = parent
-        return self.parent.addService(self)
-
-
-class AsyncMultiService(AsyncService, service.MultiService):
-
-    def startService(self):
-        service.Service.startService(self)
-        l = []
-        for svc in self:
-            # handle any deferreds, passing up errors and success
-            l.append(defer.maybeDeferred(svc.startService))
-        return defer.gatherResults(l, consumeErrors=True)
-
-    def stopService(self):
-        service.Service.stopService(self)
-        l = []
-        services = list(self)
-        services.reverse()
-        for svc in services:
-            l.append(defer.maybeDeferred(svc.stopService))
-        # unlike MultiService, consume errors in each individual deferred, and
-        # pass the first error in a child service up to our caller
-        return defer.gatherResults(l, consumeErrors=True)
-
-    def addService(self, service):
-        if service.name is not None:
-            if service.name in self.namedServices:
-                raise RuntimeError("cannot have two services with same name"
-                                   " '%s'" % service.name)
-            self.namedServices[service.name] = service
-        self.services.append(service)
-        if self.running:
-            # It may be too late for that, but we will do our best
-            service.privilegedStartService()
-            return service.startService()
-        else:
-            return defer.succeed(None)
-
-
-class BuildbotService(AsyncMultiService, config.ConfiguredMixin,
-                      ReconfigurableServiceMixin, util.ComparableMixin):
-    compare_attrs = ('name', '_config_args', '_config_kwargs', 'config_attr')
+class BuildbotServiceManager(AsyncMultiService, config.ConfiguredMixin,
+                             ReconfigurableServiceMixin):
     config_attr = "services"
-    name = None
-    configured = False
-
-    def __init__(self, *args, **kwargs):
-        name = kwargs.pop("name", None)
-        if name is not None:
-            self.name = name
-        if self.name is None:
-            raise ValueError("%s: must pass a name to constructor" % type(self))
-        self.checkConfig(*args, **kwargs)
-        self._config_args = args
-        self._config_kwargs = kwargs
-        AsyncMultiService.__init__(self)
+    name = "services"
 
     def getConfigDict(self):
-        _type = type(self)
         return {'name': self.name,
-                'class': _type.__module__ + "." + _type.__name__,
-                'args': self._config_args,
-                'kwargs': self._config_kwargs}
+                'childs': [v.getConfigDict()
+                           for v in self.namedServices.values()]}
 
+    @defer.inlineCallbacks
     def reconfigServiceWithBuildbotConfig(self, new_config):
-        # get from the config object its sibling config
-        config_sibling = getattr(new_config, self.config_attr)[self.name]
 
-        # only reconfigure if different as ComparableMixin says.
-        if self.configured and config_sibling == self:
-            return defer.succeed(None)
-        self.configured = True
-        return self.reconfigService(*config_sibling._config_args,
-                                    **config_sibling._config_kwargs)
+        # arrange childs by name
+        old_by_name = self.namedServices
+        old_set = set(old_by_name)
+        new_config_attr = getattr(new_config, self.config_attr)
+        if isinstance(new_config_attr, list):
+            new_by_name = {s.name: s
+                           for s in new_config_attr}
+        elif isinstance(new_config_attr, dict):
+            new_by_name = new_config_attr
+        else:
+            raise TypeError(
+                "config.%s should be a list or dictionary" % (self.config_attr))
+        new_set = set(new_by_name)
 
-    def setServiceParent(self, parent):
-        self.master = parent
-        return AsyncService.setServiceParent(self, parent)
+        # calculate new childs, by name, and removed childs
+        removed_names, added_names = util.diffSets(old_set, new_set)
 
-    def checkConfig(self, *args, **kwargs):
-        return defer.succeed(True)
+        # find any childs for which the fully qualified class name has
+        # changed, and treat those as an add and remove
+        # While we're at it find any service that don't know how to reconfig,
+        # and, if they have changed, add them to both removed and added, so that we
+        # run the new version
+        for n in old_set & new_set:
+            old = old_by_name[n]
+            new = new_by_name[n]
+            # detect changed class name
+            if reflect.qual(old.__class__) != reflect.qual(new.__class__):
+                removed_names.add(n)
+                added_names.add(n)
+            # compare using ComparableMixin if they don't support reconfig
+            elif not hasattr(old, 'reconfigServiceWithBuildbotConfig'):
+                if old != new:
+                    removed_names.add(n)
+                    added_names.add(n)
 
-    def reconfigService(self, *args, **kwargs):
-        return defer.succeed(None)
+        if removed_names or added_names:
+            log.msg("adding %d new %s, removing %d" %
+                    (len(added_names), self.config_attr, len(removed_names)))
+
+            for n in removed_names:
+                child = old_by_name[n]
+                # disownServiceParent calls stopService after removing the relationship
+                # as child might use self.master.data to stop itself, its better to stop it first
+                # (this is related to the fact that self.master is found by recursively looking at self.parent
+                # for a master)
+                yield child.stopService()
+                # it has already called, so do not call it again
+                child.stopService = lambda: None
+                yield child.disownServiceParent()
+
+            for n in added_names:
+                child = new_by_name[n]
+                # setup service's objectid
+                if hasattr(child, 'objectid'):
+                    class_name = '%s.%s' % (child.__class__.__module__,
+                                            child.__class__.__name__)
+                    objectid = yield self.master.db.state.getObjectId(
+                        child.name, class_name)
+                    child.objectid = objectid
+                yield defer.maybeDeferred(child.setServiceParent, self)
+
+        # As the services that were just added got
+        # reconfigServiceWithSibling called by
+        # setServiceParent->startService,
+        # we avoid calling it again by selecting
+        # in reconfigurable_services, services
+        # that were not added just now
+        reconfigurable_services = [svc for svc in self
+                                   if svc.name not in added_names]
+        # sort by priority
+        reconfigurable_services.sort(key=lambda svc: -svc.reconfig_priority)
+
+        for svc in reconfigurable_services:
+            if not svc.name:
+                raise ValueError(
+                    "{}: child {} should have a defined name attribute".format(self, svc))
+            config_sibling = new_by_name.get(svc.name)
+            try:
+                yield svc.reconfigServiceWithSibling(config_sibling)
+            except NotImplementedError:
+                # legacy support. Its too painful to transition old code to new Service life cycle
+                # so we implement switch of child when the service raises NotImplementedError
+                # Note this means that self will stop, and sibling will take ownership
+                # means that we have a small time where the service is unavailable.
+                yield svc.disownServiceParent()
+                config_sibling.objectid = svc.objectid
+                yield config_sibling.setServiceParent(self)

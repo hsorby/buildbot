@@ -43,14 +43,14 @@ In addition to what's listed below, the 0.8.7p1 release adds the following.
 
 * ``CVSMailDir`` has been fixed.
 
-* Importing ``buildbot.test`` no longer causes python to exit, if ``mock`` insn't installed.
+* Importing ``buildbot.test`` no longer causes python to exit, if ``mock`` isn't installed.
   The fixes ``pydoc -k`` when buildbot is installed.
 
 * ``Mercurial`` properly updates to the correct branch, when using ``inrepo`` branches.
 
 * Buildbot now doesn't fail on invalid UTF-8 in a number of places.
 
-* Many documenation updates and fixes.
+* Many documentation updates and fixes.
 
 Master
 ------
@@ -98,7 +98,7 @@ Features
 
 * ``ForceScheduler`` has been updated:
 
-  * support for multiple :ref:`codebases<Attr-Codebase>` via the ``codebases`` parameter
+  * support for multiple :ref:`codebases<Change-Attr-Codebase>` via the ``codebases`` parameter
   * ``NestedParameter`` to provide a logical grouping of parameters.
   * ``CodebaseParameter`` to set the branch/revision/repository/project for a codebase
   * new HTML/CSS customization points. Each parameter is contained in a ``row`` with multiple
@@ -109,7 +109,7 @@ Features
 * The :bb:chsrc:`SVNPoller` now supports multiple projects and codebases.
   See :pull:`443`.
 
-* The :bb:status:`MailNotifier` now takes a callable to calculate the "previous" build for purposes of determining status changes.
+* The :bb:reporter:`MailNotifier` now takes a callable to calculate the "previous" build for purposes of determining status changes.
   See :pull:`489`.
 
 * The ``copy_properties`` parameter, given a list of properties to copy into the new build request, has been deprecated in favor of explicit use of ``set_properties``.
@@ -125,7 +125,7 @@ Deprecations, Removals, and Non-Compatible Changes
 * Buildbot master requires ``python-dateutil`` version 1.5 to support the
   Nightly scheduler.
 
-* ``ForceScheduler`` has been updated to support multiple :ref:`codebases<Attr-Codebase>`.
+* ``ForceScheduler`` has been updated to support multiple :ref:`codebases<Change-Attr-Codebase>`.
   The branch/revision/repository/project are deprecated; if you have customized these
   values, simply provide them as ``codebases=[CodebaseParameter(name='', ...)]``.
 
@@ -139,14 +139,14 @@ Deprecations, Removals, and Non-Compatible Changes
       * ``get_from_post`` is renamed to ``getFromKwargs``
 
       * ``update_from_post`` is renamed to ``updateFromKwargs``. This function's parameters
-        are now called via named parameters to allow subclasses to ignore values it doesnt use.
+        are now called via named parameters to allow subclasses to ignore values it doesn't use.
         Subclasses should add ``**unused`` for future compatibility. A new parameter
         ``sourcestampset`` is provided to allow subclasses to modify the sourcestamp set, and
         will probably require you to add the ``**unused`` field.
 
 * The parameters to the callable version of ``build.workdir`` have changed.
   Instead of a single sourcestamp, a list of sourcestamps is passed. Each
-  sourcestamp in the list has a different :ref:`codebase<Attr-Codebase>`
+  sourcestamp in the list has a different :ref:`codebase<Change-Attr-Codebase>`
 
 * The undocumented renderable ``_ComputeRepositoryURL`` is no longer imported to
   :py:mod:`buildbot.steps.source`. It is still available at

@@ -24,12 +24,18 @@ from twisted.internet import reactor
 from twisted.protocols.basic import LineOnlyReceiver
 from twisted.python.failure import Failure
 
+from buildbot.util import unicode2bytes
+
 
 class FakeTransport:
     disconnecting = False
 
 
 class BuildmasterTimeoutError(Exception):
+    pass
+
+
+class BuildmasterStartupError(Exception):
     pass
 
 
@@ -43,21 +49,23 @@ class TailProcess(protocol.ProcessProtocol):
         self.lw.dataReceived(data)
 
     def errReceived(self, data):
-        print "ERR: '%s'" % (data,)
+        print("ERR: '%s'" % (data,))
 
 
 class LogWatcher(LineOnlyReceiver):
     POLL_INTERVAL = 0.1
     TIMEOUT_DELAY = 10.0
-    delimiter = os.linesep
+    delimiter = unicode2bytes(os.linesep)
 
-    def __init__(self, logfile):
+    def __init__(self, logfile, timeout=None, _reactor=reactor):
         self.logfile = logfile
         self.in_reconfig = False
         self.transport = FakeTransport()
         self.pp = TailProcess()
         self.pp.lw = self
         self.timer = None
+        self._reactor = _reactor
+        self._timeout_delay = timeout or self.TIMEOUT_DELAY
 
     def start(self):
         # If the log file doesn't exist, create it now.
@@ -65,18 +73,18 @@ class LogWatcher(LineOnlyReceiver):
             open(self.logfile, 'a').close()
 
         # return a Deferred that fires when the reconfig process has
-        # finished. It errbacks with TimeoutError if the finish line has not
-        # been seen within 10 seconds, and with ReconfigError if the error
+        # finished. It errbacks with TimeoutError if the startup has not
+        # progressed for 10 seconds, and with ReconfigError if the error
         # line was seen. If the logfile could not be opened, it errbacks with
         # an IOError.
         if platform.system().lower() == 'sunos' and os.path.exists('/usr/xpg4/bin/tail'):
             tailBin = "/usr/xpg4/bin/tail"
         else:
             tailBin = "/usr/bin/tail"
-        self.p = reactor.spawnProcess(self.pp, tailBin,
-                                      ("tail", "-f", "-n", "0", self.logfile),
-                                      env=os.environ,
-                                      )
+
+        args = ("tail", "-f", "-n", "0", self.logfile)
+        self.p = self._reactor.spawnProcess(self.pp, tailBin, args,
+                                            env=os.environ)
         self.running = True
         d = defer.maybeDeferred(self._start)
         return d
@@ -87,7 +95,7 @@ class LogWatcher(LineOnlyReceiver):
         return self.d
 
     def startTimer(self):
-        self.timer = reactor.callLater(self.TIMEOUT_DELAY, self.timeout)
+        self.timer = self._reactor.callLater(self._timeout_delay, self.timeout)
 
     def timeout(self):
         # was the timeout set to be ignored? if so, restart it
@@ -114,30 +122,32 @@ class LogWatcher(LineOnlyReceiver):
     def lineReceived(self, line):
         if not self.running:
             return
-        if "Log opened." in line:
+        if b"Log opened." in line:
             self.in_reconfig = True
-        if "beginning configuration update" in line:
+        if b"beginning configuration update" in line:
             self.in_reconfig = True
 
         if self.in_reconfig:
-            print line
+            print(line.decode())
 
         # certain lines indicate progress, so we "cancel" the timeout
         # and it will get re-added when it fires
-        PROGRESS_TEXT = ['Starting BuildMaster', 'Loading configuration from',
-                         'added builder', 'adding scheduler', 'Loading builder', 'Starting factory']
+        PROGRESS_TEXT = [b'Starting BuildMaster', b'Loading configuration from',
+                         b'added builder', b'adding scheduler', b'Loading builder', b'Starting factory']
         for progressText in PROGRESS_TEXT:
             if progressText in line:
                 self.timer = None
                 break
 
-        if "message from master: attached" in line:
-            return self.finished("buildslave")
-        if "reconfig aborted" in line or 'reconfig partially applied' in line:
+        if b"message from master: attached" in line:
+            return self.finished("worker")
+        if b"reconfig aborted" in line or b'reconfig partially applied' in line:
             return self.finished(Failure(ReconfigError()))
-        if "Server Shut Down" in line:
+        if b"Server Shut Down" in line:
             return self.finished(Failure(ReconfigError()))
-        if "configuration update complete" in line:
+        if b"configuration update complete" in line:
             return self.finished("buildmaster")
-        if "BuildMaster is running" in line:
+        if b"BuildMaster is running" in line:
             return self.finished("buildmaster")
+        if b"BuildMaster startup failed" in line:
+            return self.finished(Failure(BuildmasterStartupError()))

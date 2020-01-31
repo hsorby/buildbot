@@ -13,13 +13,15 @@
 #
 # Copyright Buildbot Team Members
 
+
+from twisted.internet import defer
+
 from buildbot.data import base
 from buildbot.data import types
 from buildbot.util import identifiers
-from twisted.internet import defer
 
 
-class EndpointMixin(object):
+class EndpointMixin:
 
     def db2data(self, dbdict):
         data = {
@@ -44,15 +46,15 @@ class LogEndpoint(EndpointMixin, base.BuildNestingMixin, base.Endpoint):
         /builds/n:buildid/steps/n:step_number/logs/i:log_slug
         /builders/n:builderid/builds/n:build_number/steps/i:step_name/logs/i:log_slug
         /builders/n:builderid/builds/n:build_number/steps/n:step_number/logs/i:log_slug
+        /builders/i:buildername/builds/n:build_number/steps/i:step_name/logs/i:log_slug
+        /builders/i:buildername/builds/n:build_number/steps/n:step_number/logs/i:log_slug
     """
 
     @defer.inlineCallbacks
     def get(self, resultSpec, kwargs):
         if 'logid' in kwargs:
             dbdict = yield self.master.db.logs.getLog(kwargs['logid'])
-            defer.returnValue((yield self.db2data(dbdict))
-                              if dbdict else None)
-            return
+            return (yield self.db2data(dbdict)) if dbdict else None
 
         stepid = yield self.getStepid(kwargs)
         if stepid is None:
@@ -60,8 +62,7 @@ class LogEndpoint(EndpointMixin, base.BuildNestingMixin, base.Endpoint):
 
         dbdict = yield self.master.db.logs.getLogBySlug(stepid,
                                                         kwargs.get('log_slug'))
-        defer.returnValue((yield self.db2data(dbdict))
-                          if dbdict else None)
+        return (yield self.db2data(dbdict)) if dbdict else None
 
 
 class LogsEndpoint(EndpointMixin, base.BuildNestingMixin, base.Endpoint):
@@ -73,16 +74,20 @@ class LogsEndpoint(EndpointMixin, base.BuildNestingMixin, base.Endpoint):
         /builds/n:buildid/steps/n:step_number/logs
         /builders/n:builderid/builds/n:build_number/steps/i:step_name/logs
         /builders/n:builderid/builds/n:build_number/steps/n:step_number/logs
+        /builders/i:buildername/builds/n:build_number/steps/i:step_name/logs
+        /builders/i:buildername/builds/n:build_number/steps/n:step_number/logs
     """
 
     @defer.inlineCallbacks
     def get(self, resultSpec, kwargs):
         stepid = yield self.getStepid(kwargs)
         if not stepid:
-            defer.returnValue([])
-            return
+            return []
         logs = yield self.master.db.logs.getLogs(stepid=stepid)
-        defer.returnValue([(yield self.db2data(dbdict)) for dbdict in logs])
+        results = []
+        for dbdict in logs:
+            results.append((yield self.db2data(dbdict)))
+        return results
 
 
 class Log(base.ResourceType):
@@ -114,7 +119,7 @@ class Log(base.ResourceType):
 
     @base.updateMethod
     @defer.inlineCallbacks
-    def newLog(self, stepid, name, type):
+    def addLog(self, stepid, name, type):
         slug = identifiers.forceIdentifier(50, name)
         while True:
             try:
@@ -124,21 +129,21 @@ class Log(base.ResourceType):
                 slug = identifiers.incrementIdentifier(50, slug)
                 continue
             self.generateEvent(logid, "new")
-            defer.returnValue(logid)
+            return logid
 
     @base.updateMethod
     @defer.inlineCallbacks
     def appendLog(self, logid, content):
         res = yield self.master.db.logs.appendLog(logid=logid, content=content)
         self.generateEvent(logid, "append")
-        defer.returnValue(res)
+        return res
 
     @base.updateMethod
     @defer.inlineCallbacks
     def finishLog(self, logid):
         res = yield self.master.db.logs.finishLog(logid=logid)
         self.generateEvent(logid, "finished")
-        defer.returnValue(res)
+        return res
 
     @base.updateMethod
     def compressLog(self, logid):

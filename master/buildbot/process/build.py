@@ -14,32 +14,38 @@
 # Copyright Buildbot Team Members
 
 
-import types
+from functools import reduce
 
 from twisted.internet import defer
 from twisted.internet import error
 from twisted.python import components
+from twisted.python import failure
 from twisted.python import log
 from twisted.python.failure import Failure
-from zope.interface import implements
+from zope.interface import implementer
 
 from buildbot import interfaces
+from buildbot.process import buildstep
 from buildbot.process import metrics
 from buildbot.process import properties
-from buildbot.status.builder import Results
-from buildbot.status.results import CANCELLED
-from buildbot.status.results import EXCEPTION
-from buildbot.status.results import FAILURE
-from buildbot.status.results import RETRY
-from buildbot.status.results import SUCCESS
-from buildbot.status.results import WARNINGS
-from buildbot.status.results import computeResultAndTermination
+from buildbot.process.results import CANCELLED
+from buildbot.process.results import EXCEPTION
+from buildbot.process.results import FAILURE
+from buildbot.process.results import RETRY
+from buildbot.process.results import SUCCESS
+from buildbot.process.results import WARNINGS
+from buildbot.process.results import computeResultAndTermination
+from buildbot.process.results import statusToString
+from buildbot.process.results import worst_status
+from buildbot.reporters.utils import getURLForBuild
+from buildbot.util import bytes2unicode
 from buildbot.util.eventual import eventually
 
 
+@implementer(interfaces.IBuildControl)
 class Build(properties.PropertiesMixin):
 
-    """I represent a single build by a single slave. Specialized Builders can
+    """I represent a single build by a single worker. Specialized Builders can
     use subclasses of Build to hold status information unique to those build
     processes.
 
@@ -61,8 +67,9 @@ class Build(properties.PropertiesMixin):
                         collects our status
     """
 
-    implements(interfaces.IBuildControl)
-
+    VIRTUAL_BUILDERNAME_PROP = "virtual_builder_name"
+    VIRTUAL_BUILDERDESCRIPTION_PROP = "virtual_builder_description"
+    VIRTUAL_BUILDERTAGS_PROP = "virtual_builder_tags"
     workdir = "build"
     build_status = None
     reason = "changes"
@@ -82,13 +89,26 @@ class Build(properties.PropertiesMixin):
         self.reason = requests[0].mergeReasons(requests[1:])
 
         self.currentStep = None
-        self.slaveEnvironment = {}
+        self.workerEnvironment = {}
         self.buildid = None
         self.number = None
+        self.executedSteps = []
+        self.stepnames = {}
 
         self.terminate = False
 
         self._acquiringLock = None
+        self._builderid = None
+        # overall results, may downgrade after each step
+        self.results = SUCCESS
+        self.properties = properties.Properties()
+
+        # tracks execution during the build finish phase
+        self._locks_released = False
+        self._build_finished = False
+
+        # tracks the config version for locks
+        self.config_version = None
 
     def setBuilder(self, builder):
         """
@@ -98,16 +118,18 @@ class Build(properties.PropertiesMixin):
         """
         self.builder = builder
         self.master = builder.master
+        self.config_version = builder.config_version
 
+    @defer.inlineCallbacks
     def setLocks(self, lockList):
-        # convert all locks into their real forms
-        self.locks = [(self.builder.botmaster.getLockFromLockAccess(access), access)
-                      for access in lockList]
+        self.locks = yield self.builder.botmaster.getLockFromLockAccesses(lockList,
+                                                                          self.config_version)
 
-    def setSlaveEnvironment(self, env):
+    def setWorkerEnvironment(self, env):
         # TODO: remove once we don't have anything depending on this method or attribute
-        # e.g., old-style steps (ShellMixin pulls the environment out of the builder directly)
-        self.slaveEnvironment = env
+        # e.g., old-style steps (ShellMixin pulls the environment out of the
+        # builder directly)
+        self.workerEnvironment = env
 
     def getSourceStamp(self, codebase=''):
         for source in self.sources:
@@ -118,10 +140,14 @@ class Build(properties.PropertiesMixin):
     def getAllSourceStamps(self):
         return list(self.sources)
 
-    def allChanges(self):
-        for s in self.sources:
+    @staticmethod
+    def allChangesFromSources(sources):
+        for s in sources:
             for c in s.changes:
                 yield c
+
+    def allChanges(self):
+        return Build.allChangesFromSources(self.sources)
 
     def allFiles(self):
         # return a list of all source files that were changed
@@ -132,15 +158,20 @@ class Build(properties.PropertiesMixin):
         return files
 
     def __repr__(self):
-        return "<Build %s>" % (self.builder.name,)
+        return "<Build %s number:%r results:%s>" % (
+            self.builder.name, self.number, statusToString(self.results))
 
     def blamelist(self):
+        # Note that this algorithm is also implemented in buildbot.reporters.utils.getResponsibleUsersForBuild,
+        # but using the data api.
+        # it is important for the UI to have the blamelist easily available.
+        # The best way is to make sure the owners property is set to full blamelist
         blamelist = []
         for c in self.allChanges():
             if c.who not in blamelist:
                 blamelist.append(c.who)
         for source in self.sources:
-            if source.patch_info:  # Add patch author to blamelist
+            if source.patch:  # Add patch author to blamelist
                 blamelist.append(source.patch_info[0])
         blamelist.sort()
         return blamelist
@@ -163,33 +194,44 @@ class Build(properties.PropertiesMixin):
 
     useProgress = True
 
-    def getSlaveCommandVersion(self, command, oldversion=None):
-        return self.slavebuilder.getSlaveCommandVersion(command, oldversion)
+    def getWorkerCommandVersion(self, command, oldversion=None):
+        return self.workerforbuilder.getWorkerCommandVersion(command, oldversion)
 
-    def getSlaveName(self):
-        return self.slavebuilder.slave.slavename
+    def getWorkerName(self):
+        return self.workerforbuilder.worker.workername
 
-    def setupProperties(self):
-        props = interfaces.IProperties(self)
-
-        # give the properties a reference back to this build
-        props.build = self
+    @staticmethod
+    def setupPropertiesKnownBeforeBuildStarts(props, requests, builder,
+                                              workerforbuilder):
+        # Note that this function does not setup the 'builddir' worker property
+        # It's not possible to know it until before the actual worker has
+        # attached.
 
         # start with global properties from the configuration
-        master = self.builder.master
-        props.updateFromProperties(master.config.properties)
+        props.updateFromProperties(builder.master.config.properties)
 
         # from the SourceStamps, which have properties via Change
-        for change in self.allChanges():
+        sources = requests[0].mergeSourceStampsWith(requests[1:])
+        for change in Build.allChangesFromSources(sources):
             props.updateFromProperties(change.properties)
 
-        # and finally, get any properties from requests (this is the path
-        # through which schedulers will send us properties)
-        for rq in self.requests:
+        # get any properties from requests (this is the path through which
+        # schedulers will send us properties)
+        for rq in requests:
             props.updateFromProperties(rq.properties)
 
+        # get builder properties
+        builder.setupProperties(props)
+
+        # get worker properties
+        # navigate our way back to the L{buildbot.worker.Worker}
+        # object that came from the config, and get its properties
+        workerforbuilder.worker.setupProperties(props)
+
+    def setupOwnProperties(self):
         # now set some properties of our own, corresponding to the
         # build itself
+        props = self.getProperties()
         props.setProperty("buildnumber", self.number, "Build")
 
         if self.sources and len(self.sources) == 1:
@@ -201,106 +243,191 @@ class Build(properties.PropertiesMixin):
             props.setProperty("codebase", source.codebase, "Build")
             props.setProperty("project", source.project, "Build")
 
-        self.builder.setupProperties(props)
+    def setupWorkerBuildirProperty(self, workerforbuilder):
+        path_module = workerforbuilder.worker.path_module
 
-    def setupSlaveBuilder(self, slavebuilder):
-        self.slavebuilder = slavebuilder
-
-        self.path_module = slavebuilder.slave.path_module
-
-        # navigate our way back to the L{buildbot.buildslave.BuildSlave}
+        # navigate our way back to the L{buildbot.worker.Worker}
         # object that came from the config, and get its properties
-        buildslave_properties = slavebuilder.slave.properties
-        self.getProperties().updateFromProperties(buildslave_properties)
-        if slavebuilder.slave.slave_basedir:
-            builddir = self.path_module.join(
-                slavebuilder.slave.slave_basedir,
-                self.builder.config.slavebuilddir)
-            self.setProperty("builddir", builddir, "slave")
-            self.setProperty("workdir", builddir, "slave (deprecated)")
+        if workerforbuilder.worker.worker_basedir:
+            builddir = path_module.join(
+                bytes2unicode(workerforbuilder.worker.worker_basedir),
+                bytes2unicode(self.builder.config.workerbuilddir))
+            self.setProperty("builddir", builddir, "Worker")
 
-        self.slavename = slavebuilder.slave.slavename
-        self.build_status.setSlavename(self.slavename)
+    def setupWorkerForBuilder(self, workerforbuilder):
+        self.path_module = workerforbuilder.worker.path_module
+        self.workername = workerforbuilder.worker.workername
+        self.build_status.setWorkername(self.workername)
 
     @defer.inlineCallbacks
-    def startBuild(self, build_status, expectations, slavebuilder):
+    def getBuilderId(self):
+        if self._builderid is None:
+            if self.hasProperty(self.VIRTUAL_BUILDERNAME_PROP):
+                self._builderid = yield self.builder.getBuilderIdForName(
+                    self.getProperty(self.VIRTUAL_BUILDERNAME_PROP))
+                description = self.getProperty(
+                    self.VIRTUAL_BUILDERDESCRIPTION_PROP,
+                    self.builder.config.description)
+                tags = self.getProperty(
+                    self.VIRTUAL_BUILDERTAGS_PROP,
+                    self.builder.config.tags)
+                if type(tags) == type([]) and '_virtual_' not in tags:
+                    tags.append('_virtual_')
+
+                self.master.data.updates.updateBuilderInfo(self._builderid,
+                                                           description,
+                                                           tags)
+
+            else:
+                self._builderid = yield self.builder.getBuilderId()
+        return self._builderid
+
+    @defer.inlineCallbacks
+    def startBuild(self, build_status, workerforbuilder):
         """This method sets up the build, then starts it by invoking the
         first Step. It returns a Deferred which will fire when the build
         finishes. This Deferred is guaranteed to never errback."""
-        slave = slavebuilder.slave
+        self.workerforbuilder = workerforbuilder
+        self.conn = None
 
-        # we are taking responsibility for watching the connection to the
-        # remote. This responsibility was held by the Builder until our
-        # startBuild was called, and will not return to them until we fire
-        # the Deferred returned by this method.
+        worker = workerforbuilder.worker
 
         log.msg("%s.startBuild" % self)
+
         self.build_status = build_status
         # TODO: this will go away when build collapsing is implemented; until
-        # then we just assign the bulid to the first buildrequest
+        # then we just assign the build to the first buildrequest
         brid = self.requests[0].id
+        builderid = yield self.getBuilderId()
         self.buildid, self.number = \
-            yield self.master.data.updates.newBuild(
-                builderid=(yield self.builder.getBuilderId()),
+            yield self.master.data.updates.addBuild(
+                builderid=builderid,
                 buildrequestid=brid,
-                buildslaveid=slave.buildslaveid)
+                workerid=worker.workerid)
 
-        # now that we have a build_status, we can set properties
-        self.setupProperties()
-        self.setupSlaveBuilder(slavebuilder)
-        slave.updateSlaveStatus(buildStarted=self)
+        self.stopBuildConsumer = yield self.master.mq.startConsuming(self.controlStopBuild,
+                                                                     ("control", "builds",
+                                                                      str(self.buildid),
+                                                                      "stop"))
 
-        # then narrow SlaveLocks down to the right slave
-        self.locks = [(l.getLock(self.slavebuilder.slave), a)
+        # the preparation step counts the time needed for preparing the worker and getting the locks.
+        # we cannot use a real step as we don't have a worker yet.
+        self.preparation_step = buildstep.BuildStep(name="worker_preparation")
+        self.preparation_step.setBuild(self)
+        yield self.preparation_step.addStep()
+        self.setupOwnProperties()
+
+        # then narrow WorkerLocks down to the right worker
+        self.locks = [(l.getLockForWorker(workerforbuilder.worker.workername),
+                       a)
                       for l, a in self.locks]
-        self.conn = slavebuilder.slave.conn
-        self.subs = self.conn.notifyOnDisconnect(self.lostRemote)
-
         metrics.MetricCountEvent.log('active_builds', 1)
 
-        self.deferred = defer.Deferred()
+        # make sure properties are available to people listening on 'new'
+        # events
+        yield self._flushProperties(None)
+        self.build_status.buildStarted(self)
+        yield self.master.data.updates.setBuildStateString(self.buildid, 'starting')
+        yield self.master.data.updates.generateNewBuildEvent(self.buildid)
 
         try:
-            self.setupBuild(expectations)  # create .steps
+            self.setupBuild()  # create .steps
         except Exception:
-            # the build hasn't started yet, so log the exception as a point
-            # event instead of flunking the build.
-            # TODO: associate this failure with the build instead.
-            # this involves doing
-            # self.build_status.buildStarted() from within the exception
-            # handler
-            log.msg("Build.setupBuild failed")
-            log.err(Failure())
-            self.finished = True
-            self.results = EXCEPTION
-            self.deferred = None
+            yield self.buildPreparationFailure(Failure(), "setupBuild")
+            self.buildFinished(['Build.setupBuild', 'failed'], EXCEPTION)
+            return
+
+        # flush properties in the beginning of the build
+        yield self._flushProperties(None)
+
+        yield self.master.data.updates.setBuildStateString(self.buildid,
+                                                           'preparing worker')
+        try:
+            ready_or_failure = yield workerforbuilder.prepare(self)
+        except Exception:
+            ready_or_failure = Failure()
+
+        # If prepare returns True then it is ready and we start a build
+        # If it returns failure then we don't start a new build.
+        if ready_or_failure is not True:
+            yield self.buildPreparationFailure(ready_or_failure, "worker_prepare")
+            if self.stopped:
+                self.buildFinished(["worker", "cancelled"], self.results)
+            elif isinstance(ready_or_failure, Failure) and ready_or_failure.check(interfaces.LatentWorkerCannotSubstantiate):
+                self.buildFinished(["worker", "cannot", "substantiate"], EXCEPTION)
+            else:
+                self.buildFinished(["worker", "not", "available"], RETRY)
+            return
+
+        # ping the worker to make sure they're still there. If they've
+        # fallen off the map (due to a NAT timeout or something), this
+        # will fail in a couple of minutes, depending upon the TCP
+        # timeout.
+        #
+        # TODO: This can unnecessarily suspend the starting of a build, in
+        # situations where the worker is live but is pushing lots of data to
+        # us in a build.
+        yield self.master.data.updates.setBuildStateString(self.buildid,
+                                                           'pinging worker')
+        log.msg("starting build %s.. pinging the worker %s"
+                % (self, workerforbuilder))
+        try:
+            ping_success_or_failure = yield workerforbuilder.ping()
+        except Exception:
+            ping_success_or_failure = Failure()
+
+        if ping_success_or_failure is not True:
+            yield self.buildPreparationFailure(ping_success_or_failure, "worker_ping")
+            self.buildFinished(["worker", "not", "pinged"], RETRY)
+            return
+
+        self.conn = workerforbuilder.worker.conn
+
+        # To retrieve the builddir property, the worker must be attached as we
+        # depend on its path_module. Latent workers become attached only after
+        # preparing them, so we can't setup the builddir property earlier like
+        # the rest of properties
+        self.setupWorkerBuildirProperty(workerforbuilder)
+        self.setupWorkerForBuilder(workerforbuilder)
+        self.subs = self.conn.notifyOnDisconnect(self.lostRemote)
+
+        # tell the remote that it's starting a build, too
+        try:
+            yield self.conn.remoteStartBuild(self.builder.name)
+        except Exception:
+            yield self.buildPreparationFailure(Failure(), "start_build")
+            self.buildFinished(["worker", "not", "building"], RETRY)
             return
 
         yield self.master.data.updates.setBuildStateString(self.buildid,
-                                                           u'starting')
-        self.build_status.buildStarted(self)
+                                                           'acquiring locks')
         yield self.acquireLocks()
-
-        try:
-            # start the sequence of steps and wait until it's finished
-            self.startNextStep()
-            yield self.deferred
-        finally:
-            metrics.MetricCountEvent.log('active_builds', -1)
+        yield self.master.data.updates.setStepStateString(self.preparation_step.stepid,
+                                                          "worker ready")
+        yield self.master.data.updates.finishStep(self.preparation_step.stepid, SUCCESS, False)
 
         yield self.master.data.updates.setBuildStateString(self.buildid,
-                                                           u'finished')
-        yield self.master.data.updates.finishBuild(self.buildid, self.results)
+                                                           'building')
 
-        # mark the build as finished
-        self.slavebuilder.buildFinished()
-        slave.updateSlaveStatus(buildFinished=self)
+        # start the sequence of steps
+        self.startNextStep()
+
+    @defer.inlineCallbacks
+    def buildPreparationFailure(self, why, state_string):
+        log.err(why, "while " + state_string)
+        self.workerforbuilder.worker.putInQuarantine()
+        if isinstance(why, failure.Failure):
+            yield self.preparation_step.addLogWithFailure(why)
+        yield self.master.data.updates.setStepStateString(self.preparation_step.stepid,
+                                                          "error while " + state_string)
+        yield self.master.data.updates.finishStep(self.preparation_step.stepid, EXCEPTION, False)
 
     @staticmethod
-    def canStartWithSlavebuilder(lockList, slavebuilder):
+    def _canAcquireLocks(lockList, workerforbuilder):
         for lock, access in lockList:
-            slave_lock = lock.getLock(slavebuilder.slave)
-            if not slave_lock.isAvailable(None, access):
+            worker_lock = lock.getLockForWorker(
+                workerforbuilder.worker.workername)
+            if not worker_lock.isAvailable(None, access):
                 return False
         return True
 
@@ -323,56 +450,57 @@ class Build(properties.PropertiesMixin):
             lock.claim(self, access)
         return defer.succeed(None)
 
-    def setupBuild(self, expectations):
-        # create the actual BuildSteps. If there are any name collisions, we
-        # add a count to the loser until it is unique.
-        self.steps = []
-        self.executedSteps = []
-        self.stepStatuses = {}
-        stepnames = {}
-        sps = []
+    def setUniqueStepName(self, step):
+        # If there are any name collisions, we add a count to the loser
+        # until it is unique.
+        name = step.name
+        if name in self.stepnames:
+            count = self.stepnames[name]
+            count += 1
+            self.stepnames[name] = count
+            name = "%s_%d" % (step.name, count)
+        else:
+            self.stepnames[name] = 0
+        step.name = name
 
-        for factory in self.stepFactories:
+    def setupBuildSteps(self, step_factories):
+        steps = []
+        for factory in step_factories:
             step = factory.buildStep()
             step.setBuild(self)
-            step.setBuildSlave(self.slavebuilder.slave)
-            # TODO: remove once we don't have anything depending on setDefaultWorkdir
-            if callable(self.workdir):
-                step.setDefaultWorkdir(self.workdir(self.sources))
-            else:
-                step.setDefaultWorkdir(self.workdir)
-            name = step.name
-            if name in stepnames:
-                count = stepnames[name]
-                count += 1
-                stepnames[name] = count
-                name = step.name + "_%d" % count
-            else:
-                stepnames[name] = 0
-            step.name = name
-            self.steps.append(step)
+            step.setWorker(self.workerforbuilder.worker)
+            self.setUniqueStepName(step)
+            steps.append(step)
 
-            sp = None
             if self.useProgress:
-                sp = step.setupProgress()
-            if sp:
-                sps.append(sp)
+                step.setupProgress()
+        return steps
 
-        # we are now ready to set up our BuildStatus.
-        # pass all sourcestamps to the buildstatus
-        self.build_status.setSourceStamps(self.sources)
-        self.build_status.setReason(self.reason)
-        self.build_status.setBlamelist(self.blamelist())
+    def setupBuild(self):
+        # create the actual BuildSteps.
 
+        self.steps = self.setupBuildSteps(self.stepFactories)
+
+        owners = set(self.blamelist())
         # gather owners from build requests
-        owners = [r.properties['owner'] for r in self.requests
-                  if "owner" in r.properties]
+        owners.update({r.properties['owner'] for r in self.requests
+                       if "owner" in r.properties})
         if owners:
-            self.setProperty('owners', owners, self.reason)
-
-        self.results = []  # list of FAILURE, SUCCESS, WARNINGS, SKIPPED
-        self.result = SUCCESS  # overall result, may downgrade after each step
+            self.setProperty('owners', sorted(owners), 'Build')
         self.text = []  # list of text string lists (text2)
+
+    def _addBuildSteps(self, step_factories):
+        factories = [interfaces.IBuildStepFactory(s) for s in step_factories]
+        return self.setupBuildSteps(factories)
+
+    def addStepsAfterCurrentStep(self, step_factories):
+        # Add the new steps after the step that is running.
+        # The running step has already been popped from self.steps
+        self.steps[0:0] = self._addBuildSteps(step_factories)
+
+    def addStepsAfterLastStep(self, step_factories):
+        # Add the new steps to the end.
+        self.steps.extend(self._addBuildSteps(step_factories))
 
     def getNextStep(self):
         """This method is called to obtain the next BuildStep for this build.
@@ -410,101 +538,106 @@ class Build(properties.PropertiesMixin):
     @defer.inlineCallbacks
     def _flushProperties(self, results):
         # `results` is just passed on to the next callback
-        props = interfaces.IProperties(self)
+        yield self.master.data.updates.setBuildProperties(self.buildid, self)
 
-        properties = props.getProperties().asList()
-        for name, value, source in properties:
-            yield self.master.data.updates.setBuildProperty(
-                self.buildid, name, value, source)
+        return results
 
-        defer.returnValue(results)
-
+    @defer.inlineCallbacks
     def _stepDone(self, results, step):
         self.currentStep = None
         if self.finished:
             return  # build was interrupted, don't keep building
-        terminate = self.stepDone(results, step)  # interpret/merge results
+        terminate = yield self.stepDone(results, step)  # interpret/merge results
         if terminate:
             self.terminate = True
-        return self.startNextStep()
+        yield self.startNextStep()
 
-    def stepDone(self, result, step):
+    @defer.inlineCallbacks
+    def stepDone(self, results, step):
         """This method is called when the BuildStep completes. It is passed a
         status object from the BuildStep and is responsible for merging the
         Step's results into those of the overall Build."""
 
         terminate = False
         text = None
-        if isinstance(result, types.TupleType):
-            result, text = result
-        assert isinstance(result, type(SUCCESS)), "got %r" % (result,)
-        log.msg(" step '%s' complete: %s" % (step.name, Results[result]))
-        self.results.append(result)
+        if isinstance(results, tuple):
+            results, text = results
+        assert isinstance(results, type(SUCCESS)), "got %r" % (results,)
+        summary = yield step.getBuildResultSummary()
+        if 'build' in summary:
+            text = [summary['build']]
+        log.msg(" step '%s' complete: %s (%s)" % (step.name, statusToString(results), text))
         if text:
             self.text.extend(text)
-        self.result, terminate = computeResultAndTermination(step, result,
-                                                             self.result)
+            self.master.data.updates.setBuildStateString(self.buildid,
+                                                         bytes2unicode(" ".join(self.text)))
+        self.results, terminate = computeResultAndTermination(step, results,
+                                                              self.results)
         if not self.conn:
+            # force the results to retry if the connection was lost
+            self.results = RETRY
             terminate = True
         return terminate
 
     def lostRemote(self, conn=None):
-        # the slave went away. There are several possible reasons for this,
+        # the worker went away. There are several possible reasons for this,
         # and they aren't necessarily fatal. For now, kill the build, but
         # TODO: see if we can resume the build when it reconnects.
         log.msg("%s.lostRemote" % self)
         self.conn = None
-        if self.currentStep:
+        self.text = ["lost", "connection"]
+        self.results = RETRY
+        if self.currentStep and self.currentStep.results is None:
             # this should cause the step to finish.
             log.msg(" stopping currentStep", self.currentStep)
             self.currentStep.interrupt(Failure(error.ConnectionLost()))
         else:
-            self.result = RETRY
             self.text = ["lost", "connection"]
             self.stopped = True
             if self._acquiringLock:
                 lock, access, d = self._acquiringLock
                 lock.stopWaitingUntilAvailable(self, access, d)
-                d.callback(None)
 
-    def stopBuild(self, reason="<no reason given>"):
+    def controlStopBuild(self, key, params):
+        return self.stopBuild(**params)
+
+    def stopBuild(self, reason="<no reason given>", results=CANCELLED):
         # the idea here is to let the user cancel a build because, e.g.,
         # they realized they committed a bug and they don't want to waste
         # the time building something that they know will fail. Another
         # reason might be to abandon a stuck build. We want to mark the
-        # build as failed quickly rather than waiting for the slave's
+        # build as failed quickly rather than waiting for the worker's
         # timeout to kill it on its own.
 
-        log.msg(" %s: stopping build: %s" % (self, reason))
+        log.msg(" %s: stopping build: %s %d" % (self, reason, results))
         if self.finished:
             return
         # TODO: include 'reason' in this point event
         self.stopped = True
-        if self.currentStep:
+        if self.currentStep and self.currentStep.results is None:
             self.currentStep.interrupt(reason)
 
-        self.result = CANCELLED
+        self.results = results
 
         if self._acquiringLock:
             lock, access, d = self._acquiringLock
             lock.stopWaitingUntilAvailable(self, access, d)
-            d.callback(None)
 
     def allStepsDone(self):
-        if self.result == FAILURE:
+        if self.results == FAILURE:
             text = ["failed"]
-        elif self.result == WARNINGS:
+        elif self.results == WARNINGS:
             text = ["warnings"]
-        elif self.result == EXCEPTION:
+        elif self.results == EXCEPTION:
             text = ["exception"]
-        elif self.result == RETRY:
+        elif self.results == RETRY:
             text = ["retry"]
-        elif self.result == CANCELLED:
+        elif self.results == CANCELLED:
             text = ["cancelled"]
         else:
             text = ["build", "successful"]
         text.extend(self.text)
-        return self.buildFinished(text, self.result)
+        return self.buildFinished(text, self.results)
 
     def buildException(self, why):
         log.msg("%s.buildException" % self)
@@ -516,42 +649,92 @@ class Build(properties.PropertiesMixin):
         except Exception:
             log.err(Failure(), 'while finishing a build with an exception')
 
+    @defer.inlineCallbacks
     def buildFinished(self, text, results):
         """This method must be called when the last Step has completed. It
         marks the Build as complete and returns the Builder to the 'idle'
         state.
 
         It takes two arguments which describe the overall build status:
-        text, results. 'results' is one of SUCCESS, WARNINGS, or FAILURE.
+        text, results. 'results' is one of the possible results (see buildbot.process.results).
 
-        If 'results' is SUCCESS or WARNINGS, we will permit any dependant
+        If 'results' is SUCCESS or WARNINGS, we will permit any dependent
         builds to start. If it is 'FAILURE', those builds will be
         abandoned."""
+        try:
+            self.stopBuildConsumer.stopConsuming()
+            self.finished = True
+            if self.conn:
+                self.subs.unsubscribe()
+                self.subs = None
+                self.conn = None
+            log.msg(" %s: build finished" % self)
+            self.results = worst_status(self.results, results)
+            self.build_status.setText(text)
+            self.build_status.setResults(self.results)
+            self.build_status.buildFinished()
+            eventually(self.releaseLocks)
+            metrics.MetricCountEvent.log('active_builds', -1)
 
-        self.finished = True
-        if self.conn:
-            self.subs.unsubscribe()
-            self.subs = None
-            self.conn = None
-        self.results = results
+            yield self.master.data.updates.setBuildStateString(self.buildid,
+                                                               bytes2unicode(" ".join(text)))
+            yield self.master.data.updates.finishBuild(self.buildid, self.results)
 
-        log.msg(" %s: build finished" % self)
-        self.build_status.setText(text)
-        self.build_status.setResults(results)
-        self.build_status.buildFinished()
-        eventually(self.releaseLocks)
-        self.deferred.callback(self)
-        self.deferred = None
+            if self.results == EXCEPTION:
+                # When a build has an exception, put the worker in quarantine for a few seconds
+                # to make sure we try next build with another worker
+                self.workerforbuilder.worker.putInQuarantine()
+            elif self.results != RETRY:
+                # This worker looks sane if status is neither retry or exception
+
+                # Avoid a race in case the build step reboot the worker
+                if self.workerforbuilder.worker is not None:
+                    self.workerforbuilder.worker.resetQuarantine()
+
+            # mark the build as finished
+            self.workerforbuilder.buildFinished()
+            self.builder.buildFinished(self, self.workerforbuilder)
+
+            self._tryScheduleBuildsAfterLockUnlock(build_finished=True)
+        except Exception:
+            log.err(None, 'from finishing a build; this is a '
+                          'serious error - please file a bug at http://buildbot.net')
 
     def releaseLocks(self):
         if self.locks:
             log.msg("releaseLocks(%s): %s" % (self, self.locks))
+
         for lock, access in self.locks:
             if lock.isOwner(self, access):
                 lock.release(self, access)
-            else:
-                # This should only happen if we've been interrupted
-                assert self.stopped
+
+        self._tryScheduleBuildsAfterLockUnlock(locks_released=True)
+
+    def _tryScheduleBuildsAfterLockUnlock(self, locks_released=False,
+                                          build_finished=False):
+        # we need to inform the botmaster to attempt to schedule any pending
+        # build request if we released any locks. This is because buildrequest
+        # may be started for a completely unrelated builder and yet depend on
+        # a lock released by this build.
+        #
+        # TODO: the current approach is dumb as we just attempt to schedule
+        # all buildrequests. A much better idea would be to record the reason
+        # of why a buildrequest was not scheduled in the BuildRequestDistributor
+        # and then attempt to schedule only these buildrequests which may have
+        # had that reason resolved.
+
+        # this function is complicated by the fact that the botmaster must be
+        # informed only when all locks have been released and the actions in
+        # buildFinished have concluded. Since releaseLocks is called using
+        # eventually this may happen in any order.
+        self._locks_released = self._locks_released or locks_released
+        self._build_finished = self._build_finished or build_finished
+
+        if not self.locks:
+            return
+
+        if self._locks_released and self._build_finished:
+            self.builder.botmaster.maybeStartBuildsForAllBuilders()
 
     def getSummaryStatistic(self, name, summary_fn, initial_value=_sentinel):
         step_stats_list = [
@@ -560,8 +743,20 @@ class Build(properties.PropertiesMixin):
             if st.hasStatistic(name)]
         if initial_value is self._sentinel:
             return reduce(summary_fn, step_stats_list)
-        else:
-            return reduce(summary_fn, step_stats_list, initial_value)
+        return reduce(summary_fn, step_stats_list, initial_value)
+
+    @defer.inlineCallbacks
+    def getUrl(self):
+        builder_id = yield self.getBuilderId()
+        return getURLForBuild(self.master, builder_id, self.number)
+
+    def waitUntilFinished(self):
+        return self.master.mq.waitUntilEvent(
+            ('builds', str(self.buildid), 'finished'),
+            lambda: self.finished)
+
+    def getWorkerInfo(self):
+        return self.workerforbuilder.worker.worker_status.info
 
     # IBuildControl
 
@@ -570,6 +765,7 @@ class Build(properties.PropertiesMixin):
 
     # stopBuild is defined earlier
 
+
 components.registerAdapter(
-    lambda build: interfaces.IProperties(build.build_status),
+    lambda build: interfaces.IProperties(build.properties),
     Build, interfaces.IProperties)

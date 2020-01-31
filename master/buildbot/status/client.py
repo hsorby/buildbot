@@ -13,8 +13,10 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.status import base
+
 from twisted.python import log
+
+from buildbot.status import base
 
 
 class PBListener(base.StatusReceiverBase):

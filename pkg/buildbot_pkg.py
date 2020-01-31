@@ -13,25 +13,110 @@
 #
 # Copyright Buildbot Team Members
 
-import subprocess
-
-# XXX(sa2ajj): this is an interesting mix of distutils and setuptools.  Needs
-# to be reviewed.
-from distutils.command.build import build
-from distutils.version import LooseVersion
-from setuptools import setup
-from setuptools.command.build_py import build_py
-from setuptools.command.egg_info import egg_info
-
+# Method to add build step taken from here
+# https://seasonofcode.com/posts/how-to-add-custom-build-steps-and-commands-to-setuppy.html
+import datetime
+import distutils.cmd
 import os
+import re
+import subprocess
+import sys
+from distutils.version import LooseVersion
+from subprocess import PIPE
+from subprocess import STDOUT
+from subprocess import Popen
+
+import setuptools.command.build_py
+import setuptools.command.egg_info
+from setuptools import setup
+
+old_listdir = os.listdir
+
+
+def listdir(path):
+    # patch listdir to avoid looking into node_modules
+    l = old_listdir(path)
+    if "node_modules" in l:
+        l.remove("node_modules")
+    return l
+os.listdir = listdir
 
 
 def check_output(cmd):
+    """Version of check_output which does not throw error"""
     popen = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
-    return popen.communicate()[0].strip()
+    out = popen.communicate()[0].strip()
+    if not isinstance(out, str):
+        out = out.decode(sys.stdout.encoding)
+    return out
+
+
+def gitDescribeToPep440(version):
+    # git describe produce version in the form: v0.9.8-20-gf0f45ca
+    # where 20 is the number of commit since last release, and gf0f45ca is the short commit id preceded by 'g'
+    # we parse this a transform into a pep440 release version 0.9.9.dev20 (increment last digit and add dev before 20)
+
+    VERSION_MATCH = re.compile(r'(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(\.post(?P<post>\d+))?(-(?P<dev>\d+))?(-g(?P<commit>.+))?')
+    v = VERSION_MATCH.search(version)
+    if v:
+        major = int(v.group('major'))
+        minor = int(v.group('minor'))
+        patch = int(v.group('patch'))
+        if v.group('dev'):
+            patch += 1
+            dev = int(v.group('dev'))
+            return "{}.{}.{}-dev{}".format(major, minor, patch, dev)
+        if v.group('post'):
+            return "{}.{}.{}.post{}".format(major, minor, patch, v.group('post'))
+        return "{}.{}.{}".format(major, minor, patch)
+
+    return v
+
+
+def mTimeVersion(init_file):
+    cwd = os.path.dirname(os.path.abspath(init_file))
+    m = 0
+    for root, dirs, files in os.walk(cwd):
+        for f in files:
+            m = max(os.path.getmtime(os.path.join(root, f)), m)
+    d = datetime.datetime.utcfromtimestamp(m)
+    return d.strftime("%Y.%m.%d")
+
+
+def getVersionFromArchiveId(git_archive_id='$Format:%ct %d$'):
+    """ Extract the tag if a source is from git archive.
+
+        When source is exported via `git archive`, the git_archive_id init value is modified
+        and placeholders are expanded to the "archived" revision:
+
+            %ct: committer date, UNIX timestamp
+            %d: ref names, like the --decorate option of git-log
+
+        See man gitattributes(5) and git-log(1) (PRETTY FORMATS) for more details.
+    """
+    # mangle the magic string to make sure it is not replaced by git archive
+    if not git_archive_id.startswith('$For''mat:'):
+        # source was modified by git archive, try to parse the version from
+        # the value of git_archive_id
+
+        match = re.search(r'tag:\s*v([^,)]+)', git_archive_id)
+        if match:
+            # archived revision is tagged, use the tag
+            return gitDescribeToPep440(match.group(1))
+
+        # archived revision is not tagged, use the commit date
+        tstamp = git_archive_id.strip().split()[0]
+        d = datetime.datetime.utcfromtimestamp(int(tstamp))
+        return d.strftime('%Y.%m.%d')
+    return None
 
 
 def getVersion(init_file):
+    """
+    Return BUILDBOT_VERSION environment variable, content of VERSION file, git
+    tag or 'latest'
+    """
+
     try:
         return os.environ['BUILDBOT_VERSION']
     except KeyError:
@@ -40,29 +125,33 @@ def getVersion(init_file):
     try:
         cwd = os.path.dirname(os.path.abspath(init_file))
         fn = os.path.join(cwd, 'VERSION')
-        version = open(fn).read().strip()
-        return version
+        with open(fn) as f:
+            return f.read().strip()
     except IOError:
         pass
 
-    from subprocess import Popen, PIPE, STDOUT
-    import re
-
-    # accept version to be coded with 2 or 3 parts (X.Y or X.Y.Z),
-    # no matter the number of digits for X, Y and Z
-    VERSION_MATCH = re.compile(r'(\d+\.\d+(\.\d+)?)(\w|-)*')
+    version = getVersionFromArchiveId()
+    if version is not None:
+        return version
 
     try:
         p = Popen(['git', 'describe', '--tags', '--always'], stdout=PIPE, stderr=STDOUT, cwd=cwd)
         out = p.communicate()[0]
 
         if (not p.returncode) and out:
-            v = VERSION_MATCH.search(out)
-            if v is not None:
-                return v.group(1)
+            v = gitDescribeToPep440(str(out))
+            if v:
+                return v
     except OSError:
         pass
-    return "999.0-version-not-found"
+
+    try:
+        # if we really can't find the version, we use the date of modification of the most recent file
+        # docker hub builds cannot use git describe
+        return mTimeVersion(init_file)
+    except Exception:
+        # bummer. lets report something
+        return "latest"
 
 
 # JS build strategy:
@@ -89,61 +178,83 @@ def getVersion(init_file):
 # - install, via egg_info
 # - sdist, via egg_info
 # - bdist_wheel, via build
-# This is why we override both egg_info and build, and the first run build the js.
+# This is why we override both egg_info and build, and the first run build
+# the js.
 
-js_built = False
+class BuildJsCommand(distutils.cmd.Command):
+    """A custom command to run JS build."""
 
+    description = 'run JS build'
+    already_run = False
 
-def build_js(cmd):
-    global js_built
-    if js_built:
-        return
-    package = cmd.distribution.packages[0]
-    if os.path.exists("gulpfile.js"):
-        npm_version = check_output("npm -v")
-        npm_bin = check_output("npm bin").strip()
-        assert npm_version != "", "need nodejs and npm installed in current PATH"
-        assert LooseVersion(npm_version) >= LooseVersion("1.4"), "npm < 1.4 (%s)" % (npm_version)
-        cmd.spawn(['npm', 'install'])
-        cmd.spawn([os.path.join(npm_bin, "gulp"), 'prod', '--notests'])
+    def initialize_options(self):
+        """Set default values for options."""
 
-    cmd.copy_tree(os.path.join(package, 'static'), os.path.join("build", "lib", package, "static"))
-
-    with open(os.path.join("build", "lib", package, "VERSION"), "w") as f:
-        f.write(cmd.distribution.metadata.version)
-
-    with open(os.path.join(package, "VERSION"), "w") as f:
-        f.write(cmd.distribution.metadata.version)
-
-    js_built = True
-
-
-class my_build(build):
+    def finalize_options(self):
+        """Post-process options."""
 
     def run(self):
-        build_js(self)
-        return build.run(self)
+        """Run command."""
+        if self.already_run:
+            return
+        package = self.distribution.packages[0]
+        if os.path.exists("gulpfile.js") or os.path.exists("webpack.config.js"):
+            yarn_version = check_output("yarn --version")
+            assert yarn_version != "", "need nodejs and yarn installed in current PATH"
+            yarn_bin = check_output("yarn bin").strip()
+
+            commands = []
+
+            commands.append(['yarn', 'install', '--pure-lockfile'])
+
+            if os.path.exists("gulpfile.js"):
+                commands.append([os.path.join(yarn_bin, "gulp"), 'prod', '--notests'])
+            elif os.path.exists("webpack.config.js"):
+                commands.append(['yarn', 'run', 'build'])
+
+            shell = bool(os.name == 'nt')
+
+            for command in commands:
+                self.announce(
+                    'Running command: %s' % str(" ".join(command)),
+                    level=distutils.log.INFO)
+                subprocess.check_call(command, shell=shell)
+
+        self.copy_tree(os.path.join(package, 'static'), os.path.join(
+            "build", "lib", package, "static"))
+
+        with open(os.path.join("build", "lib", package, "VERSION"), "w") as f:
+            f.write(self.distribution.metadata.version)
+
+        with open(os.path.join(package, "VERSION"), "w") as f:
+            f.write(self.distribution.metadata.version)
+
+        self.already_run = True
 
 
-class my_egg_info(egg_info):
+class BuildPyCommand(setuptools.command.build_py.build_py):
+    """Custom build command."""
 
     def run(self):
-        build_js(self)
-        return egg_info.run(self)
+        self.run_command('build_js')
+        super().run()
 
 
-# XXX(sa2ajj): this class exists only to address https://bitbucket.org/pypa/setuptools/issue/261
-# Once that's fixed, this class should go.
-class my_build_py(build_py):
+class EggInfoCommand(setuptools.command.egg_info.egg_info):
+    """Custom egginfo command."""
 
-    def find_data_files(self, package, src_dir):
-        tempo = build_py.find_data_files(self, package, src_dir)
-
-        return [x for x in tempo if os.path.isfile(x)]
+    def run(self):
+        self.run_command('build_js')
+        super().run()
 
 
 def setup_www_plugin(**kw):
     package = kw['packages'][0]
-    setup(version=getVersion(os.path.join(package, "__init__.py")),
-          cmdclass=dict(build=my_build, egg_info=my_egg_info, build_py=my_build_py),
-          **kw)
+    if 'version' not in kw:
+        kw['version'] = getVersion(os.path.join(package, "__init__.py"))
+
+    setup(cmdclass=dict(
+        egg_info=EggInfoCommand,
+        build_py=BuildPyCommand,
+        build_js=BuildJsCommand),
+        **kw)

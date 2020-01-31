@@ -1,3 +1,4 @@
+# -*- coding: utf8 -*-
 # This file is part of Buildbot.  Buildbot is free software: you can
 # redistribute it and/or modify it under the terms of the GNU General Public
 # License as published by the Free Software Foundation, version 2.
@@ -13,24 +14,27 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot import config
-from buildbot.process import buildstep
-from buildbot.status.results import FAILURE
-from buildbot.status.results import RETRY
-from buildbot.status.results import SUCCESS
-from buildbot.steps.source import svn
-from buildbot.steps.transfer import _FileReader
-from buildbot.test.fake.remotecommand import Expect
-from buildbot.test.fake.remotecommand import ExpectRemoteRef
-from buildbot.test.fake.remotecommand import ExpectShell
-from buildbot.test.util import sourcesteps
-from buildbot.test.util.properties import ConstantRenderable
+from twisted.internet import defer
 from twisted.internet import error
 from twisted.python.reflect import namedModule
 from twisted.trial import unittest
 
+from buildbot import config
+from buildbot.process import buildstep
+from buildbot.process import remotetransfer
+from buildbot.process.results import FAILURE
+from buildbot.process.results import RETRY
+from buildbot.process.results import SUCCESS
+from buildbot.steps.source import svn
+from buildbot.test.fake.remotecommand import Expect
+from buildbot.test.fake.remotecommand import ExpectRemoteRef
+from buildbot.test.fake.remotecommand import ExpectShell
+from buildbot.test.util import sourcesteps
+from buildbot.test.util.misc import TestReactorMixin
+from buildbot.test.util.properties import ConstantRenderable
 
-class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
+
+class TestSVN(sourcesteps.SourceStepMixin, TestReactorMixin, unittest.TestCase):
 
     svn_st_xml = """<?xml version="1.0"?>
         <status>
@@ -43,7 +47,7 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                     <wc-status props="none" item="unversioned">
                     </wc-status>
                 </entry>
-                <entry path="svn_external_path/unversioned_file2">
+                <entry path="svn_external_path/unversioned_file2_uniçode">
                     <wc-status props="none" item="unversioned">
                     </wc-status>
                 </entry>
@@ -114,27 +118,26 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                             </info>"""
 
     def setUp(self):
+        self.setUpTestReactor()
         return self.setUpSourceStep()
 
     def tearDown(self):
         return self.tearDownSourceStep()
 
-    def patch_slaveVersionIsOlderThan(self, result):
-        self.patch(svn.SVN, 'slaveVersionIsOlderThan', lambda x, y, z: result)
+    def patch_workerVersionIsOlderThan(self, result):
+        self.patch(svn.SVN, 'workerVersionIsOlderThan', lambda x, y, z: result)
 
     def test_no_repourl(self):
-        self.assertRaises(config.ConfigErrors, lambda:
-                          svn.SVN())
+        with self.assertRaises(config.ConfigErrors):
+            svn.SVN()
 
     def test_incorrect_mode(self):
-        self.assertRaises(config.ConfigErrors, lambda:
-                          svn.SVN(repourl='http://svn.local/app/trunk',
-                                  mode='invalid'))
+        with self.assertRaises(config.ConfigErrors):
+            svn.SVN(repourl='http://svn.local/app/trunk', mode='invalid')
 
     def test_incorrect_method(self):
-        self.assertRaises(config.ConfigErrors, lambda:
-                          svn.SVN(repourl='http://svn.local/app/trunk',
-                                  method='invalid'))
+        with self.assertRaises(config.ConfigErrors):
+            svn.SVN(repourl='http://svn.local/app/trunk', method='invalid')
 
     def test_svn_not_installed(self):
         self.setupStep(svn.SVN(repourl='http://svn.local/app/trunk'))
@@ -178,6 +181,7 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
         self.expectOutcome(result=FAILURE)
         return self.runStep()
 
+    @defer.inlineCallbacks
     def test_revision_noninteger(self):
         svnTestStep = svn.SVN(repourl='http://svn.local/app/trunk')
         self.setupStep(svnTestStep)
@@ -210,16 +214,14 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
         )
         self.expectOutcome(result=SUCCESS)
         self.expectProperty('got_revision', 'a10', 'SVN')
-        d = self.runStep()
+        yield self.runStep()
 
-        def _checkType():
-            revision = self.step.getProperty('got_revision')
-            self.assertRaises(ValueError, lambda: int(revision))
-        d.addCallback(lambda _: _checkType())
-        return d
+        revision = self.step.getProperty('got_revision')
+        with self.assertRaises(ValueError):
+            int(revision)
 
     def test_revision_missing(self):
-        """Fail if 'revision' tag isnt there"""
+        """Fail if 'revision' tag isn't there"""
         svn_info_stdout = self.svn_info_stdout_xml.replace('entry', 'Blah')
 
         svnTestStep = svn.SVN(repourl='http://svn.local/app/trunk')
@@ -419,7 +421,7 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             Expect('stat', dict(file='wkdir/.svn',
                                 logEnviron=True))
             + 1,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/trunk/app',
@@ -449,13 +451,13 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             Expect('stat', dict(file='wkdir/.svn',
                                 logEnviron=True))
             + 1,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/trunk/app',
                                  '.', '--non-interactive', '--no-auth-cache'])
             + 1,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/trunk/app',
@@ -492,7 +494,7 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             + ExpectShell.log('stdio',  # expecting ../trunk/app
                               stdout="""<?xml version="1.0"?><url>http://svn.local/branch/foo/app</url>""")
             + 0,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/trunk/app',
@@ -678,7 +680,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', {'dir': 'wkdir',
-                             'logEnviron': True})
+                             'logEnviron': True,
+                             'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout',
@@ -709,7 +712,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', {'dir': 'wkdir',
-                             'logEnviron': True})
+                             'logEnviron': True,
+                             'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout',
@@ -784,19 +788,19 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             Expect('stat', {'file': 'wkdir/.svn',
                             'logEnviron': True})
             + 1,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/app/trunk',
                                  '.', '--non-interactive', '--no-auth-cache'])
             + 1,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/app/trunk',
                                  '.', '--non-interactive', '--no-auth-cache'])
             + 1,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/app/trunk',
@@ -888,8 +892,9 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                               stdout=self.svn_st_xml)
             + 0,
             Expect('rmdir', {'dir':
-                             ['wkdir/svn_external_path/unversioned_file2'],
-                             'logEnviron': True})
+                             ['wkdir/svn_external_path/unversioned_file2_uniçode'],
+                             'logEnviron': True,
+                             'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'update',
@@ -1002,7 +1007,7 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             Expect('stat', {'file': 'wkdir/.svn',
                             'logEnviron': True})
             + 1,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/app/trunk',
@@ -1033,7 +1038,7 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             Expect('stat', {'file': 'wkdir/.svn',
                             'logEnviron': True})
             + 1,
-            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True})
+            Expect('rmdir', {'dir': 'wkdir', 'logEnviron': True, 'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'checkout', 'http://svn.local/app/trunk',
@@ -1053,7 +1058,7 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
         self.setupStep(
             svn.SVN(repourl='http://svn.local/app/trunk',
                     mode='full', method='clean'))
-        self.patch_slaveVersionIsOlderThan(True)
+        self.patch_workerVersionIsOlderThan(True)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['svn', '--version'])
@@ -1080,11 +1085,13 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             + 0,
             Expect('rmdir', {'dir':
                              'wkdir/svn_external_path/unversioned_file1',
-                             'logEnviron': True})
+                             'logEnviron': True,
+                             'timeout': 1200})
             + 0,
             Expect('rmdir', {'dir':
-                             'wkdir/svn_external_path/unversioned_file2',
-                             'logEnviron': True})
+                             'wkdir/svn_external_path/unversioned_file2_uniçode',
+                             'logEnviron': True,
+                             'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'update',
@@ -1104,7 +1111,7 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             svn.SVN(repourl='http://svn.local/app/trunk',
                     mode='full', method='clean'))
 
-        self.patch_slaveVersionIsOlderThan(False)
+        self.patch_workerVersionIsOlderThan(False)
         self.expectCommands(
             ExpectShell(workdir='wkdir',
                         command=['svn', '--version'])
@@ -1131,8 +1138,9 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             + 0,
             Expect('rmdir', {'dir':
                              ['wkdir/svn_external_path/unversioned_file1',
-                              'wkdir/svn_external_path/unversioned_file2'],
-                             'logEnviron': True})
+                              'wkdir/svn_external_path/unversioned_file2_uniçode'],
+                             'logEnviron': True,
+                             'timeout': 1200})
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'update',
@@ -1160,7 +1168,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1200))
             + 0,
             Expect('stat', dict(file='source/app/.svn',
                                 logEnviron=True))
@@ -1204,7 +1213,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1200))
             + 0,
             Expect('stat', dict(file='source/.svn',
                                 logEnviron=True))
@@ -1246,7 +1256,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1200))
             + 0,
             Expect('stat', dict(file='source/.svn',
                                 logEnviron=True))
@@ -1295,11 +1306,13 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                               stdout=self.svn_st_xml)
             + 0,
             Expect('rmdir', dict(dir=['wkdir/svn_external_path/unversioned_file1',
-                                      'wkdir/svn_external_path/unversioned_file2'],
-                                 logEnviron=True))
+                                      'wkdir/svn_external_path/unversioned_file2_uniçode'],
+                                 logEnviron=True,
+                                 timeout=1200))
             + 0,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1200))
             + 0,
             Expect('stat', dict(file='source/.svn',
                                 logEnviron=True))
@@ -1318,13 +1331,90 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
             ExpectShell(workdir='',
                         command=['svn', 'export', 'source', 'wkdir'])
             + 0,
-            Expect('downloadFile', dict(blocksize=16384, maxsize=None,
-                                        reader=ExpectRemoteRef(_FileReader),
+            Expect('downloadFile', dict(blocksize=32768, maxsize=None,
+                                        reader=ExpectRemoteRef(
+                                            remotetransfer.StringFileReader),
+                                        workerdest='.buildbot-diff', workdir='wkdir',
+                                        mode=None))
+            + 0,
+            Expect('downloadFile', dict(blocksize=32768, maxsize=None,
+                                        reader=ExpectRemoteRef(
+                                            remotetransfer.StringFileReader),
+                                        workerdest='.buildbot-patched', workdir='wkdir',
+                                        mode=None))
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['patch', '-p1', '--remove-empty-files',
+                                 '--force', '--forward', '-i', '.buildbot-diff'])
+            + 0,
+            Expect('rmdir', dict(dir='wkdir/.buildbot-diff',
+                                 logEnviron=True))
+            + 0,
+            ExpectShell(workdir='source',
+                        command=['svn', 'info', '--xml'])
+            + ExpectShell.log('stdio',
+                              stdout=self.svn_info_stdout_xml)
+            + 0,
+        )
+        self.expectOutcome(result=SUCCESS)
+        self.expectProperty('got_revision', '100', 'SVN')
+        return self.runStep()
+
+    def test_mode_full_export_patch_worker_2_16(self):
+        self.setupStep(
+            svn.SVN(repourl='http://svn.local/app/trunk',
+                    mode='full', method='export'),
+            patch=(1, 'patch'),
+            worker_version={'*': '2.16'})
+        self.expectCommands(
+            ExpectShell(workdir='wkdir',
+                        command=['svn', '--version'])
+            + 0,
+            Expect('stat', dict(file='wkdir/.buildbot-patched',
+                                logEnviron=True))
+            + 0,
+            ExpectShell(workdir='wkdir',
+                        command=['svn',
+                                 'status', '--xml',
+                                 '--non-interactive', '--no-auth-cache'])
+            + ExpectShell.log('stdio',
+                              stdout=self.svn_st_xml)
+            + 0,
+            Expect('rmdir', dict(dir=['wkdir/svn_external_path/unversioned_file1',
+                                      'wkdir/svn_external_path/unversioned_file2_uniçode'],
+                                 logEnviron=True,
+                                 timeout=1200))
+            + 0,
+            Expect('rmdir', dict(dir='wkdir',
+                                 logEnviron=True,
+                                 timeout=1200))
+            + 0,
+            Expect('stat', dict(file='source/.svn',
+                                logEnviron=True))
+            + 0,
+            ExpectShell(workdir='source',
+                        command=['svn', 'info', '--xml',
+                                 '--non-interactive',
+                                 '--no-auth-cache'])
+            + ExpectShell.log('stdio',
+                              stdout="""<?xml version="1.0"?><url>http://svn.local/app/trunk</url>""")
+            + 0,
+            ExpectShell(workdir='source',
+                        command=['svn', 'update', '--non-interactive',
+                                 '--no-auth-cache'])
+            + 0,
+            ExpectShell(workdir='',
+                        command=['svn', 'export', 'source', 'wkdir'])
+            + 0,
+            Expect('downloadFile', dict(blocksize=32768, maxsize=None,
+                                        reader=ExpectRemoteRef(
+                                            remotetransfer.StringFileReader),
                                         slavedest='.buildbot-diff', workdir='wkdir',
                                         mode=None))
             + 0,
-            Expect('downloadFile', dict(blocksize=16384, maxsize=None,
-                                        reader=ExpectRemoteRef(_FileReader),
+            Expect('downloadFile', dict(blocksize=32768, maxsize=None,
+                                        reader=ExpectRemoteRef(
+                                            remotetransfer.StringFileReader),
                                         slavedest='.buildbot-patched', workdir='wkdir',
                                         mode=None))
             + 0,
@@ -1359,7 +1449,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1))
             + 0,
             Expect('stat', dict(file='source/.svn',
                                 logEnviron=True))
@@ -1406,7 +1497,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1200))
             + 0,
             Expect('stat', dict(file='source/.svn',
                                 logEnviron=True))
@@ -1449,7 +1541,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1200))
             + 0,
             Expect('stat', dict(file='source/.svn',
                                 logEnviron=True))
@@ -1622,7 +1715,12 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                  '--non-interactive',
                                  '--no-auth-cache', '--username', 'user',
                                  '--password', ('obfuscated', 'pass', 'XXXXXX'), '--random'])
-            + ExpectShell.log('stdio', stdout="""<?xml version="1.0"?><entry kind="dir" path="/a/b/c" revision="1"><url>http://svn.local/app/trunk</url></entry>""")
+            +
+            ExpectShell.log(
+                'stdio', stdout='<?xml version="1.0"?>'
+                                '<entry kind="dir" path="/a/b/c" revision="1">'
+                                '<url>http://svn.local/app/trunk</url>'
+                                '</entry>')
             + 0,
             ExpectShell(workdir='wkdir',
                         command=['svn', 'update', '--non-interactive',
@@ -1650,7 +1748,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', {'dir': 'wkdir',
-                             'logEnviron': True})
+                             'logEnviron': True,
+                             'timeout': 1200})
             + 1,
         )
         self.expectOutcome(result=FAILURE)
@@ -1668,7 +1767,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1200))
             + 1,
         )
         self.expectOutcome(result=FAILURE)
@@ -1686,7 +1786,8 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                                 logEnviron=True))
             + 1,
             Expect('rmdir', dict(dir='wkdir',
-                                 logEnviron=True))
+                                 logEnviron=True,
+                                 timeout=1200))
             + 0,
             Expect('stat', dict(file='source/.svn',
                                 logEnviron=True))
@@ -1741,14 +1842,15 @@ class TestSVN(sourcesteps.SourceStepMixin, unittest.TestCase):
                               stdout=self.svn_st_xml)
             + 0,
             Expect('rmdir', {'dir':
-                             ['wkdir/svn_external_path/unversioned_file2'],
-                             'logEnviron': True})
+                             ['wkdir/svn_external_path/unversioned_file2_uniçode'],
+                             'logEnviron': True,
+                             'timeout': 1200})
             + 1,
         )
         self.expectOutcome(result=FAILURE)
         return self.runStep()
 
-    def test_slave_connection_lost(self):
+    def test_worker_connection_lost(self):
         self.setupStep(
             svn.SVN(repourl='http://svn.local/app/trunk',
                     mode='incremental', username='user',
@@ -1854,7 +1956,8 @@ class TestGetUnversionedFiles(unittest.TestCase):
         </status>
         """
         unversioned_files = list(svn.SVN.getUnversionedFiles(svn_st_xml, []))
-        self.assertEquals(["svn_external_path/unversioned_file"], unversioned_files)
+        self.assertEqual(
+            ["svn_external_path/unversioned_file"], unversioned_files)
 
     def test_getUnversionedFiles_does_not_list_missing(self):
         svn_st_xml = """<?xml version="1.0"?>
@@ -1867,7 +1970,7 @@ class TestGetUnversionedFiles(unittest.TestCase):
         </status>
         """
         unversioned_files = list(svn.SVN.getUnversionedFiles(svn_st_xml, []))
-        self.assertEquals([], unversioned_files)
+        self.assertEqual([], unversioned_files)
 
     def test_getUnversionedFiles_corrupted_xml(self):
         svn_st_xml_corrupt = """<?xml version="1.0"?>
@@ -1883,8 +1986,8 @@ class TestGetUnversionedFiles(unittest.TestCase):
             </target>
         </status>
         """
-        self.assertRaises(buildstep.BuildStepFailed,
-                          lambda: list(svn.SVN.getUnversionedFiles(svn_st_xml_corrupt, [])))
+        with self.assertRaises(buildstep.BuildStepFailed):
+            list(svn.SVN.getUnversionedFiles(svn_st_xml_corrupt, []))
 
     def test_getUnversionedFiles_no_path(self):
         svn_st_xml = """<?xml version="1.0"?>
@@ -1902,7 +2005,7 @@ class TestGetUnversionedFiles(unittest.TestCase):
         </status>
         """
         unversioned_files = list(svn.SVN.getUnversionedFiles(svn_st_xml, []))
-        self.assertEquals([], unversioned_files)
+        self.assertEqual([], unversioned_files)
 
     def test_getUnversionedFiles_no_item(self):
         svn_st_xml = """<?xml version="1.0"?>
@@ -1920,7 +2023,26 @@ class TestGetUnversionedFiles(unittest.TestCase):
         </status>
         """
         unversioned_files = list(svn.SVN.getUnversionedFiles(svn_st_xml, []))
-        self.assertEquals(["svn_external_path/unversioned_file"], unversioned_files)
+        self.assertEqual(
+            ["svn_external_path/unversioned_file"], unversioned_files)
+
+    def test_getUnversionedFiles_unicode(self):
+        svn_st_xml = """<?xml version="1.0"?>
+        <status>
+            <target path=".">
+                <entry
+                   path="Path/To/Content/Developers/François">
+                    <wc-status
+                       item="unversioned"
+                       props="none">
+                    </wc-status>
+                </entry>
+            </target>
+        </status>
+        """
+        unversioned_files = list(svn.SVN.getUnversionedFiles(svn_st_xml, []))
+        self.assertEqual(
+            ["Path/To/Content/Developers/François"], unversioned_files)
 
 
 class TestSvnUriCanonicalize(unittest.TestCase):

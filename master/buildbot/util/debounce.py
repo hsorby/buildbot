@@ -13,10 +13,10 @@
 #
 # Copyright Buildbot Team Members
 
+
 import functools
 
 from twisted.internet import defer
-from twisted.internet import reactor
 from twisted.python import log
 
 # debounce phases
@@ -26,11 +26,11 @@ PH_RUNNING = 2
 PH_RUNNING_QUEUED = 3
 
 
-class Debouncer(object):
+class Debouncer:
     __slots__ = ['phase', 'timer', 'wait', 'function', 'stopped',
-                 'completeDeferreds', '_reactor']
+                 'completeDeferreds', 'get_reactor']
 
-    def __init__(self, wait, function):
+    def __init__(self, wait, function, get_reactor):
         # time to wait
         self.wait = wait
         # zero-argument callable to invoke
@@ -44,14 +44,14 @@ class Debouncer(object):
         # deferreds to fire when the call is complete
         self.completeDeferreds = None
         # for tests
-        self._reactor = reactor
+        self.get_reactor = get_reactor
 
     def __call__(self):
         if self.stopped:
             return
         phase = self.phase
         if phase == PH_IDLE:
-            self.timer = self._reactor.callLater(self.wait, self.invoke)
+            self.timer = self.get_reactor().callLater(self.wait, self.invoke)
             self.phase = PH_WAITING
         elif phase == PH_RUNNING:
             self.phase = PH_RUNNING_QUEUED
@@ -93,24 +93,30 @@ class Debouncer(object):
         return defer.succeed(None)
 
 
-class _Descriptor(object):
+class _Descriptor:
 
-    def __init__(self, fn, wait, attrName):
+    def __init__(self, fn, wait, attrName, get_reactor):
         self.fn = fn
         self.wait = wait
         self.attrName = attrName
+        self.get_reactor = get_reactor
 
     def __get__(self, instance, cls):
         try:
             db = getattr(instance, self.attrName)
         except AttributeError:
-            db = Debouncer(self.wait, functools.partial(self.fn, instance))
+            db = Debouncer(self.wait, functools.partial(self.fn, instance),
+                           functools.partial(self.get_reactor, instance))
             setattr(instance, self.attrName, db)
         return db
 
 
-def method(wait):
+def _get_reactor_from_master(o):
+    return o.master.reactor
+
+
+def method(wait, get_reactor=_get_reactor_from_master):
     def wrap(fn):
         stateName = "__debounce_" + fn.__name__ + "__"
-        return _Descriptor(fn, wait, stateName)
+        return _Descriptor(fn, wait, stateName, get_reactor)
     return wrap

@@ -13,34 +13,31 @@
 #
 # Copyright Buildbot Team Members
 
-from __future__ import with_statement
-
+import json
 import os
 import shutil
 import stat
 import tarfile
 import tempfile
-
-from twisted.trial import unittest
+from io import BytesIO
 
 from mock import Mock
 
+from twisted.internet import defer
+from twisted.trial import unittest
+
 from buildbot import config
-from buildbot import interfaces
-from buildbot.process import buildstep
-from buildbot.process.properties import Properties
-from buildbot.status.results import EXCEPTION
-from buildbot.status.results import FAILURE
-from buildbot.status.results import SKIPPED
-from buildbot.status.results import SUCCESS
+from buildbot.process import remotetransfer
+from buildbot.process.results import EXCEPTION
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SKIPPED
+from buildbot.process.results import SUCCESS
 from buildbot.steps import transfer
 from buildbot.test.fake.remotecommand import Expect
 from buildbot.test.fake.remotecommand import ExpectRemoteRef
-from buildbot.test.util import compat
 from buildbot.test.util import steps
-from buildbot.util import json
-
-from cStringIO import StringIO
+from buildbot.test.util.misc import TestReactorMixin
+from buildbot.util import unicode2bytes
 
 
 def uploadString(string, timestamp=None):
@@ -53,19 +50,33 @@ def uploadString(string, timestamp=None):
     return behavior
 
 
+def downloadString(memoizer, timestamp=None):
+    def behavior(command):
+        reader = command.args['reader']
+        read = reader.remote_read(1000)
+        # save what we read so we can check it
+        memoizer(read)
+        reader.remote_close()
+        if timestamp:
+            reader.remote_utime(timestamp)
+        return read
+    return behavior
+
+
 def uploadTarFile(filename, **members):
     def behavior(command):
-        f = StringIO()
+        f = BytesIO()
         archive = tarfile.TarFile(fileobj=f, name=filename, mode='w')
-        for name, content in members.iteritems():
-            archive.addfile(tarfile.TarInfo(name), StringIO(content))
+        for name, content in members.items():
+            content = unicode2bytes(content)
+            archive.addfile(tarfile.TarInfo(name), BytesIO(content))
         writer = command.args['writer']
         writer.remote_write(f.getvalue())
         writer.remote_unpack()
     return behavior
 
 
-class UploadError(object):
+class UploadError:
 
     def __init__(self, behavior):
         self.behavior = behavior
@@ -78,84 +89,10 @@ class UploadError(object):
         raise RuntimeError('uh oh')
 
 
-# Test buildbot.steps.transfer._FileWriter class.
-class TestFileWriter(unittest.TestCase):
-
-    # test _FileWrite.__init__() method.
-
-    def testInit(self):
-        #
-        # patch functions called in constructor
-        #
-
-        # patch os.path.exists() to always return False
-        mockedExists = Mock(return_value=False)
-        self.patch(os.path, "exists", mockedExists)
-
-        # capture calls to os.makedirs()
-        mockedMakedirs = Mock()
-        self.patch(os, 'makedirs', mockedMakedirs)
-
-        # capture calls to tempfile.mkstemp()
-        mockedMkstemp = Mock(return_value=(7, "tmpname"))
-        self.patch(tempfile, "mkstemp", mockedMkstemp)
-
-        # capture calls to os.fdopen()
-        mockedFdopen = Mock()
-        self.patch(os, "fdopen", mockedFdopen)
-
-        #
-        # call _FileWriter constructor
-        #
-        destfile = os.path.join("dir", "file")
-        transfer._FileWriter(destfile, 64, stat.S_IRUSR)
-
-        #
-        # validate captured calls
-        #
-        absdir = os.path.dirname(os.path.abspath(os.path.join("dir", "file")))
-        mockedExists.assert_called_once_with(absdir)
-        mockedMakedirs.assert_called_once_with(absdir)
-        mockedMkstemp.assert_called_once_with(dir=absdir)
-        mockedFdopen.assert_called_once_with(7, 'wb')
-
-# Test buildbot.steps.transfer._TransferBuildStep class.
-
-
-class TestTransferBuildStep(unittest.TestCase):
-
-    # Test calling checkSlaveVersion() when buildslave have support for
-    # requested remote command.
-
-    def testCheckSlaveVersionGood(self):
-        # patch BuildStep.slaveVersion() to return success
-        mockedSlaveVersion = Mock()
-        self.patch(buildstep.BuildStep, "slaveVersion", mockedSlaveVersion)
-
-        # check that no exceptions are raised
-        transfer._TransferBuildStep().checkSlaveVersion("foo")
-
-        # make sure slaveVersion() was called with correct arguments
-        mockedSlaveVersion.assert_called_once_with("foo")
-
-    # Test calling checkSlaveVersion() when buildslave is to old to support
-    # requested remote command.
-    def testCheckSlaveVersionTooOld(self):
-        # patch BuildStep.slaveVersion() to return error
-        self.patch(buildstep.BuildStep,
-                   "slaveVersion",
-                   Mock(return_value=None))
-
-        # make sure appropriate exception is raised
-        step = transfer._TransferBuildStep()
-        self.assertRaisesRegexp(interfaces.BuildSlaveTooOldError,
-                                "slave is too old, does not know about foo",
-                                step.checkSlaveVersion, "foo")
-
-
-class TestFileUpload(steps.BuildStepMixin, unittest.TestCase):
+class TestFileUpload(steps.BuildStepMixin, TestReactorMixin, unittest.TestCase):
 
     def setUp(self):
+        self.setUpTestReactor()
         fd, self.destfile = tempfile.mkstemp()
         os.close(fd)
         os.unlink(self.destfile)
@@ -167,18 +104,19 @@ class TestFileUpload(steps.BuildStepMixin, unittest.TestCase):
         return self.tearDownBuildStep()
 
     def testConstructorModeType(self):
-        self.assertRaises(config.ConfigErrors, lambda:
-                          transfer.FileUpload(slavesrc=__file__, masterdest='xyz', mode='g+rwx'))
+        with self.assertRaises(config.ConfigErrors):
+            transfer.FileUpload(workersrc=__file__,
+                                masterdest='xyz', mode='g+rwx')
 
     def testBasic(self):
         self.setupStep(
-            transfer.FileUpload(slavesrc='srcfile', masterdest=self.destfile))
+            transfer.FileUpload(workersrc='srcfile', masterdest=self.destfile))
 
         self.expectCommands(
             Expect('uploadFile', dict(
-                slavesrc="srcfile", workdir='wkdir',
-                blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                workersrc="srcfile", workdir='wkdir',
+                blocksize=262144, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + Expect.behavior(uploadString("Hello world!"))
             + 0)
 
@@ -187,18 +125,37 @@ class TestFileUpload(steps.BuildStepMixin, unittest.TestCase):
         d = self.runStep()
         return d
 
+    def testWorker2_16(self):
+        self.setupStep(
+            transfer.FileUpload(workersrc='srcfile', masterdest=self.destfile),
+            worker_version={'*': '2.16'})
+
+        self.expectCommands(
+            Expect('uploadFile', dict(
+                slavesrc="srcfile", workdir='wkdir',
+                blocksize=262144, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
+            + Expect.behavior(uploadString("Hello world!"))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS, state_string="uploading srcfile")
+        d = self.runStep()
+        return d
+
+    @defer.inlineCallbacks
     def testTimestamp(self):
         self.setupStep(
-            transfer.FileUpload(slavesrc=__file__, masterdest=self.destfile, keepstamp=True))
+            transfer.FileUpload(workersrc=__file__, masterdest=self.destfile, keepstamp=True))
 
         timestamp = (os.path.getatime(__file__),
                      os.path.getmtime(__file__))
 
         self.expectCommands(
             Expect('uploadFile', dict(
-                slavesrc=__file__, workdir='wkdir',
-                blocksize=16384, maxsize=None, keepstamp=True,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                workersrc=__file__, workdir='wkdir',
+                blocksize=262144, maxsize=None, keepstamp=True,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + Expect.behavior(uploadString('test', timestamp=timestamp))
             + 0)
 
@@ -206,31 +163,51 @@ class TestFileUpload(steps.BuildStepMixin, unittest.TestCase):
             result=SUCCESS,
             state_string="uploading %s" % os.path.basename(__file__))
 
-        d = self.runStep()
+        yield self.runStep()
 
-        @d.addCallback
-        def checkTimestamp(_):
-            desttimestamp = (os.path.getatime(self.destfile),
-                             os.path.getmtime(self.destfile))
+        desttimestamp = (os.path.getatime(self.destfile),
+                         os.path.getmtime(self.destfile))
 
-            srctimestamp = map(int, timestamp)
-            desttimestamp = map(int, desttimestamp)
+        srctimestamp = [int(t) for t in timestamp]
+        desttimestamp = [int(d) for d in desttimestamp]
 
-            self.assertEquals(srctimestamp[0], desttimestamp[0])
-            self.assertEquals(srctimestamp[1], desttimestamp[1])
-        return d
+        self.assertEqual(srctimestamp[0], desttimestamp[0])
+        self.assertEqual(srctimestamp[1], desttimestamp[1])
 
-    def testURL(self):
+    def testDescriptionDone(self):
         self.setupStep(
-            transfer.FileUpload(slavesrc=__file__, masterdest=self.destfile, url="http://server/file"))
+            transfer.FileUpload(workersrc=__file__, masterdest=self.destfile, url="http://server/file",
+                                descriptionDone="Test File Uploaded"))
 
         self.step.addURL = Mock()
 
         self.expectCommands(
             Expect('uploadFile', dict(
-                slavesrc=__file__, workdir='wkdir',
-                blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                workersrc=__file__, workdir='wkdir',
+                blocksize=262144, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
+            + Expect.behavior(uploadString("Hello world!"))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS,
+            state_string="Test File Uploaded")
+
+        d = self.runStep()
+        return d
+
+    @defer.inlineCallbacks
+    def testURL(self):
+        self.setupStep(
+            transfer.FileUpload(workersrc=__file__, masterdest=self.destfile, url="http://server/file"))
+
+        self.step.addURL = Mock()
+
+        self.expectCommands(
+            Expect('uploadFile', dict(
+                workersrc=__file__, workdir='wkdir',
+                blocksize=262144, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + Expect.behavior(uploadString("Hello world!"))
             + 0)
 
@@ -238,23 +215,44 @@ class TestFileUpload(steps.BuildStepMixin, unittest.TestCase):
             result=SUCCESS,
             state_string="uploading %s" % os.path.basename(__file__))
 
-        d = self.runStep()
+        yield self.runStep()
 
-        @d.addCallback
-        def checkURL(_):
-            self.step.addURL.assert_called_once_with(
-                os.path.basename(self.destfile), "http://server/file")
-        return d
+        self.step.addURL.assert_called_once_with(
+            os.path.basename(self.destfile), "http://server/file")
 
-    def testFailure(self):
+    @defer.inlineCallbacks
+    def testURLText(self):
         self.setupStep(
-            transfer.FileUpload(slavesrc='srcfile', masterdest=self.destfile))
+            transfer.FileUpload(workersrc=__file__, masterdest=self.destfile, url="http://server/file", urlText="testfile"))
+
+        self.step.addURL = Mock()
 
         self.expectCommands(
             Expect('uploadFile', dict(
-                slavesrc="srcfile", workdir='wkdir',
-                blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                workersrc=__file__, workdir='wkdir',
+                blocksize=262144, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
+            + Expect.behavior(uploadString("Hello world!"))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS,
+            state_string="uploading %s" % os.path.basename(__file__))
+
+        yield self.runStep()
+
+        self.step.addURL.assert_called_once_with(
+            "testfile", "http://server/file")
+
+    def testFailure(self):
+        self.setupStep(
+            transfer.FileUpload(workersrc='srcfile', masterdest=self.destfile))
+
+        self.expectCommands(
+            Expect('uploadFile', dict(
+                workersrc="srcfile", workdir='wkdir',
+                blocksize=262144, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + 1)
 
         self.expectOutcome(
@@ -263,36 +261,51 @@ class TestFileUpload(steps.BuildStepMixin, unittest.TestCase):
         d = self.runStep()
         return d
 
-    @compat.usesFlushLoggedErrors
+    @defer.inlineCallbacks
     def testException(self):
         self.setupStep(
-            transfer.FileUpload(slavesrc='srcfile', masterdest=self.destfile))
+            transfer.FileUpload(workersrc='srcfile', masterdest=self.destfile))
 
         behavior = UploadError(uploadString("Hello world!"))
 
         self.expectCommands(
             Expect('uploadFile', dict(
-                slavesrc="srcfile", workdir='wkdir',
-                blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                workersrc="srcfile", workdir='wkdir',
+                blocksize=262144, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + Expect.behavior(behavior))
 
         self.expectOutcome(
             result=EXCEPTION, state_string="uploading srcfile (exception)")
-        d = self.runStep()
+        yield self.runStep()
 
-        @d.addCallback
-        def check(_):
-            self.assertEqual(behavior.writer.cancel.called, True)
-            self.assertEqual(
-                len(self.flushLoggedErrors(RuntimeError)), 1)
+        self.assertEqual(behavior.writer.cancel.called, True)
+        self.assertEqual(
+            len(self.flushLoggedErrors(RuntimeError)), 1)
 
-        return d
+    def test_init_workersrc_keyword(self):
+        step = transfer.FileUpload(
+            workersrc='srcfile', masterdest='dstfile')
+
+        self.assertEqual(step.workersrc, 'srcfile')
+
+    def test_init_workersrc_positional(self):
+        step = transfer.FileUpload('srcfile', 'dstfile')
+
+        self.assertEqual(step.workersrc, 'srcfile')
+
+    def test_init_positional_args(self):
+        with self.assertRaises(TypeError):
+            transfer.FileUpload()
+        with self.assertRaises(TypeError):
+            transfer.FileUpload('src')
 
 
-class TestDirectoryUpload(steps.BuildStepMixin, unittest.TestCase):
+class TestDirectoryUpload(steps.BuildStepMixin, TestReactorMixin,
+                          unittest.TestCase):
 
     def setUp(self):
+        self.setUpTestReactor()
         self.destdir = os.path.abspath('destdir')
         if os.path.exists(self.destdir):
             shutil.rmtree(self.destdir)
@@ -307,13 +320,32 @@ class TestDirectoryUpload(steps.BuildStepMixin, unittest.TestCase):
 
     def testBasic(self):
         self.setupStep(
-            transfer.DirectoryUpload(slavesrc="srcdir", masterdest=self.destdir))
+            transfer.DirectoryUpload(workersrc="srcdir", masterdest=self.destdir))
+
+        self.expectCommands(
+            Expect('uploadDirectory', dict(
+                workersrc="srcdir", workdir='wkdir',
+                blocksize=16384, compress=None, maxsize=None,
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
+            + Expect.behavior(uploadTarFile('fake.tar', test="Hello world!"))
+            + 0)
+
+        self.expectOutcome(result=SUCCESS,
+                           state_string="uploading srcdir")
+        d = self.runStep()
+        return d
+
+    def testWorker2_16(self):
+        self.setupStep(
+            transfer.DirectoryUpload(
+                workersrc="srcdir", masterdest=self.destdir),
+            worker_version={'*': '2.16'})
 
         self.expectCommands(
             Expect('uploadDirectory', dict(
                 slavesrc="srcdir", workdir='wkdir',
                 blocksize=16384, compress=None, maxsize=None,
-                writer=ExpectRemoteRef(transfer._DirectoryWriter)))
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
             + Expect.behavior(uploadTarFile('fake.tar', test="Hello world!"))
             + 0)
 
@@ -324,13 +356,13 @@ class TestDirectoryUpload(steps.BuildStepMixin, unittest.TestCase):
 
     def testFailure(self):
         self.setupStep(
-            transfer.DirectoryUpload(slavesrc="srcdir", masterdest=self.destdir))
+            transfer.DirectoryUpload(workersrc="srcdir", masterdest=self.destdir))
 
         self.expectCommands(
             Expect('uploadDirectory', dict(
-                slavesrc="srcdir", workdir='wkdir',
+                workersrc="srcdir", workdir='wkdir',
                 blocksize=16384, compress=None, maxsize=None,
-                writer=ExpectRemoteRef(transfer._DirectoryWriter)))
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
             + 1)
 
         self.expectOutcome(result=FAILURE,
@@ -338,37 +370,52 @@ class TestDirectoryUpload(steps.BuildStepMixin, unittest.TestCase):
         d = self.runStep()
         return d
 
-    @compat.usesFlushLoggedErrors
+    @defer.inlineCallbacks
     def testException(self):
         self.setupStep(
-            transfer.DirectoryUpload(slavesrc='srcdir', masterdest=self.destdir))
+            transfer.DirectoryUpload(workersrc='srcdir', masterdest=self.destdir))
 
         behavior = UploadError(uploadTarFile('fake.tar', test="Hello world!"))
 
         self.expectCommands(
             Expect('uploadDirectory', dict(
-                slavesrc="srcdir", workdir='wkdir',
+                workersrc="srcdir", workdir='wkdir',
                 blocksize=16384, compress=None, maxsize=None,
-                writer=ExpectRemoteRef(transfer._DirectoryWriter)))
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
             + Expect.behavior(behavior))
 
         self.expectOutcome(
             result=EXCEPTION,
             state_string="uploading srcdir (exception)")
-        d = self.runStep()
+        yield self.runStep()
 
-        @d.addCallback
-        def check(_):
-            self.assertEqual(behavior.writer.cancel.called, True)
-            self.assertEqual(
-                len(self.flushLoggedErrors(RuntimeError)), 1)
+        self.assertEqual(behavior.writer.cancel.called, True)
+        self.assertEqual(
+            len(self.flushLoggedErrors(RuntimeError)), 1)
 
-        return d
+    def test_init_workersrc_keyword(self):
+        step = transfer.DirectoryUpload(
+            workersrc='srcfile', masterdest='dstfile')
+
+        self.assertEqual(step.workersrc, 'srcfile')
+
+    def test_init_workersrc_positional(self):
+        step = transfer.DirectoryUpload('srcfile', 'dstfile')
+
+        self.assertEqual(step.workersrc, 'srcfile')
+
+    def test_init_positional_args(self):
+        with self.assertRaises(TypeError):
+            transfer.DirectoryUpload()
+        with self.assertRaises(TypeError):
+            transfer.DirectoryUpload('src')
 
 
-class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
+class TestMultipleFileUpload(steps.BuildStepMixin, TestReactorMixin,
+                             unittest.TestCase):
 
     def setUp(self):
+        self.setUpTestReactor()
         self.destdir = os.path.abspath('destdir')
         if os.path.exists(self.destdir):
             shutil.rmtree(self.destdir)
@@ -383,7 +430,7 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
 
     def testEmpty(self):
         self.setupStep(
-            transfer.MultipleFileUpload(slavesrcs=[], masterdest=self.destdir))
+            transfer.MultipleFileUpload(workersrcs=[], masterdest=self.destdir))
 
         self.expectCommands()
 
@@ -393,7 +440,7 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
 
     def testFile(self):
         self.setupStep(
-            transfer.MultipleFileUpload(slavesrcs=["srcfile"], masterdest=self.destdir))
+            transfer.MultipleFileUpload(workersrcs=["srcfile"], masterdest=self.destdir))
 
         self.expectCommands(
             Expect('stat', dict(file="srcfile",
@@ -401,9 +448,9 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
             + Expect.update('stat', [stat.S_IFREG, 99, 99])
             + 0,
             Expect('uploadFile', dict(
-                slavesrc="srcfile", workdir='wkdir',
+                workersrc="srcfile", workdir='wkdir',
                 blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + Expect.behavior(uploadString("Hello world!"))
             + 0)
 
@@ -413,7 +460,7 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
 
     def testDirectory(self):
         self.setupStep(
-            transfer.MultipleFileUpload(slavesrcs=["srcdir"], masterdest=self.destdir))
+            transfer.MultipleFileUpload(workersrcs=["srcdir"], masterdest=self.destdir))
 
         self.expectCommands(
             Expect('stat', dict(file="srcdir",
@@ -421,9 +468,9 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
             + Expect.update('stat', [stat.S_IFDIR, 99, 99])
             + 0,
             Expect('uploadDirectory', dict(
-                slavesrc="srcdir", workdir='wkdir',
+                workersrc="srcdir", workdir='wkdir',
                 blocksize=16384, compress=None, maxsize=None,
-                writer=ExpectRemoteRef(transfer._DirectoryWriter)))
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
             + Expect.behavior(uploadTarFile('fake.tar', test="Hello world!"))
             + 0)
 
@@ -433,7 +480,99 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
 
     def testMultiple(self):
         self.setupStep(
-            transfer.MultipleFileUpload(slavesrcs=["srcfile", "srcdir"], masterdest=self.destdir))
+            transfer.MultipleFileUpload(workersrcs=["srcfile", "srcdir"], masterdest=self.destdir))
+
+        self.expectCommands(
+            Expect('stat', dict(file="srcfile",
+                                workdir='wkdir'))
+            + Expect.update('stat', [stat.S_IFREG, 99, 99])
+            + 0,
+            Expect('uploadFile', dict(
+                workersrc="srcfile", workdir='wkdir',
+                blocksize=16384, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
+            + Expect.behavior(uploadString("Hello world!"))
+            + 0,
+            Expect('stat', dict(file="srcdir",
+                                workdir='wkdir'))
+            + Expect.update('stat', [stat.S_IFDIR, 99, 99])
+            + 0,
+            Expect('uploadDirectory', dict(
+                workersrc="srcdir", workdir='wkdir',
+                blocksize=16384, compress=None, maxsize=None,
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
+            + Expect.behavior(uploadTarFile('fake.tar', test="Hello world!"))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS, state_string="uploading 2 files")
+        d = self.runStep()
+        return d
+
+    def testMultipleString(self):
+        self.setupStep(
+            transfer.MultipleFileUpload(workersrcs="srcfile", masterdest=self.destdir))
+        self.expectCommands(
+            Expect('stat', dict(file="srcfile",
+                                workdir='wkdir'))
+            + Expect.update('stat', [stat.S_IFREG, 99, 99])
+            + 0,
+            Expect('uploadFile', dict(
+                workersrc="srcfile", workdir='wkdir',
+                blocksize=16384, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
+            + Expect.behavior(uploadString("Hello world!"))
+            + 0)
+        self.expectOutcome(
+            result=SUCCESS, state_string="uploading 1 file")
+        d = self.runStep()
+        return d
+
+    def testGlob(self):
+        self.setupStep(
+            transfer.MultipleFileUpload(
+                workersrcs=["src*"], masterdest=self.destdir, glob=True))
+        self.expectCommands(
+            Expect('glob', dict(path=os.path.join(
+                'wkdir', 'src*'), logEnviron=False))
+            + Expect.update('files', ["srcfile"])
+            + 0,
+            Expect('stat', dict(file="srcfile",
+                                workdir='wkdir'))
+            + Expect.update('stat', [stat.S_IFREG, 99, 99])
+            + 0,
+            Expect('uploadFile', dict(
+                workersrc="srcfile", workdir='wkdir',
+                blocksize=16384, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
+            + Expect.behavior(uploadString("Hello world!"))
+            + 0,
+        )
+        self.expectOutcome(
+            result=SUCCESS, state_string="uploading 1 file")
+        d = self.runStep()
+        return d
+
+    def testFailedGlob(self):
+        self.setupStep(
+            transfer.MultipleFileUpload(
+                workersrcs=["src*"], masterdest=self.destdir, glob=True))
+        self.expectCommands(
+            Expect('glob', {'path': os.path.join(
+                'wkdir', 'src*'), 'logEnviron': False})
+            + Expect.update('files', [])
+            + 1,
+        )
+        self.expectOutcome(
+            result=SKIPPED, state_string="uploading 0 files (skipped)")
+        d = self.runStep()
+        return d
+
+    def testFileWorker2_16(self):
+        self.setupStep(
+            transfer.MultipleFileUpload(
+                workersrcs=["srcfile"], masterdest=self.destdir),
+            worker_version={'*': '2.16'})
 
         self.expectCommands(
             Expect('stat', dict(file="srcfile",
@@ -443,7 +582,51 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
             Expect('uploadFile', dict(
                 slavesrc="srcfile", workdir='wkdir',
                 blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
+            + Expect.behavior(uploadString("Hello world!"))
+            + 0)
+
+        self.expectOutcome(result=SUCCESS, state_string="uploading 1 file")
+        d = self.runStep()
+        return d
+
+    def testDirectoryWorker2_16(self):
+        self.setupStep(
+            transfer.MultipleFileUpload(
+                workersrcs=["srcdir"], masterdest=self.destdir),
+            worker_version={'*': '2.16'})
+
+        self.expectCommands(
+            Expect('stat', dict(file="srcdir",
+                                workdir='wkdir'))
+            + Expect.update('stat', [stat.S_IFDIR, 99, 99])
+            + 0,
+            Expect('uploadDirectory', dict(
+                slavesrc="srcdir", workdir='wkdir',
+                blocksize=16384, compress=None, maxsize=None,
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
+            + Expect.behavior(uploadTarFile('fake.tar', test="Hello world!"))
+            + 0)
+
+        self.expectOutcome(result=SUCCESS, state_string="uploading 1 file")
+        d = self.runStep()
+        return d
+
+    def testMultipleWorker2_16(self):
+        self.setupStep(
+            transfer.MultipleFileUpload(
+                workersrcs=["srcfile", "srcdir"], masterdest=self.destdir),
+            worker_version={'*': '2.16'})
+
+        self.expectCommands(
+            Expect('stat', dict(file="srcfile",
+                                workdir='wkdir'))
+            + Expect.update('stat', [stat.S_IFREG, 99, 99])
+            + 0,
+            Expect('uploadFile', dict(
+                slavesrc="srcfile", workdir='wkdir',
+                blocksize=16384, maxsize=None, keepstamp=False,
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + Expect.behavior(uploadString("Hello world!"))
             + 0,
             Expect('stat', dict(file="srcdir",
@@ -453,7 +636,7 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
             Expect('uploadDirectory', dict(
                 slavesrc="srcdir", workdir='wkdir',
                 blocksize=16384, compress=None, maxsize=None,
-                writer=ExpectRemoteRef(transfer._DirectoryWriter)))
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
             + Expect.behavior(uploadTarFile('fake.tar', test="Hello world!"))
             + 0)
 
@@ -464,7 +647,7 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
 
     def testFailure(self):
         self.setupStep(
-            transfer.MultipleFileUpload(slavesrcs=["srcfile", "srcdir"], masterdest=self.destdir))
+            transfer.MultipleFileUpload(workersrcs=["srcfile", "srcdir"], masterdest=self.destdir))
 
         self.expectCommands(
             Expect('stat', dict(file="srcfile",
@@ -472,9 +655,9 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
             + Expect.update('stat', [stat.S_IFREG, 99, 99])
             + 0,
             Expect('uploadFile', dict(
-                slavesrc="srcfile", workdir='wkdir',
+                workersrc="srcfile", workdir='wkdir',
                 blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + 1)
 
         self.expectOutcome(
@@ -482,10 +665,10 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
         d = self.runStep()
         return d
 
-    @compat.usesFlushLoggedErrors
+    @defer.inlineCallbacks
     def testException(self):
         self.setupStep(
-            transfer.MultipleFileUpload(slavesrcs=["srcfile", "srcdir"], masterdest=self.destdir))
+            transfer.MultipleFileUpload(workersrcs=["srcfile", "srcdir"], masterdest=self.destdir))
 
         behavior = UploadError(uploadString("Hello world!"))
 
@@ -495,30 +678,27 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
             + Expect.update('stat', [stat.S_IFREG, 99, 99])
             + 0,
             Expect('uploadFile', dict(
-                slavesrc="srcfile", workdir='wkdir',
+                workersrc="srcfile", workdir='wkdir',
                 blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + Expect.behavior(behavior))
 
         self.expectOutcome(
             result=EXCEPTION, state_string="uploading 2 files (exception)")
-        d = self.runStep()
+        yield self.runStep()
 
-        @d.addCallback
-        def check(_):
-            self.assertEqual(behavior.writer.cancel.called, True)
-            self.assertEqual(
-                len(self.flushLoggedErrors(RuntimeError)), 1)
+        self.assertEqual(behavior.writer.cancel.called, True)
+        self.assertEqual(
+            len(self.flushLoggedErrors(RuntimeError)), 1)
 
-        return d
-
+    @defer.inlineCallbacks
     def testSubclass(self):
         class CustomStep(transfer.MultipleFileUpload):
             uploadDone = Mock(return_value=None)
             allUploadsDone = Mock(return_value=None)
 
         step = CustomStep(
-            slavesrcs=["srcfile", "srcdir"], masterdest=self.destdir)
+            workersrcs=["srcfile", "srcdir"], masterdest=self.destdir)
         self.setupStep(step)
 
         self.expectCommands(
@@ -527,9 +707,9 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
             + Expect.update('stat', [stat.S_IFREG, 99, 99])
             + 0,
             Expect('uploadFile', dict(
-                slavesrc="srcfile", workdir='wkdir',
+                workersrc="srcfile", workdir='wkdir',
                 blocksize=16384, maxsize=None, keepstamp=False,
-                writer=ExpectRemoteRef(transfer._FileWriter)))
+                writer=ExpectRemoteRef(remotetransfer.FileWriter)))
             + Expect.behavior(uploadString("Hello world!"))
             + 0,
             Expect('stat', dict(file="srcdir",
@@ -537,128 +717,348 @@ class TestMultipleFileUpload(steps.BuildStepMixin, unittest.TestCase):
             + Expect.update('stat', [stat.S_IFDIR, 99, 99])
             + 0,
             Expect('uploadDirectory', dict(
-                slavesrc="srcdir", workdir='wkdir',
+                workersrc="srcdir", workdir='wkdir',
                 blocksize=16384, compress=None, maxsize=None,
-                writer=ExpectRemoteRef(transfer._DirectoryWriter)))
+                writer=ExpectRemoteRef(remotetransfer.DirectoryWriter)))
             + Expect.behavior(uploadTarFile('fake.tar', test="Hello world!"))
             + 0)
 
         self.expectOutcome(
             result=SUCCESS, state_string="uploading 2 files")
 
-        d = self.runStep()
+        yield self.runStep()
 
-        @d.addCallback
         def checkCalls(res):
-            self.assertEquals(step.uploadDone.call_count, 2)
-            self.assertEquals(step.uploadDone.call_args_list[0],
-                              ((SUCCESS, 'srcfile', os.path.join(self.destdir, 'srcfile')), {}))
-            self.assertEquals(step.uploadDone.call_args_list[1],
-                              ((SUCCESS, 'srcdir', os.path.join(self.destdir, 'srcdir')), {}))
-            self.assertEquals(step.allUploadsDone.call_count, 1)
-            self.assertEquals(step.allUploadsDone.call_args_list[0],
-                              ((SUCCESS, ['srcfile', 'srcdir'], self.destdir), {}))
-            return res
+            self.assertEqual(step.uploadDone.call_count, 2)
+            self.assertEqual(step.uploadDone.call_args_list[0],
+                             ((SUCCESS, 'srcfile', os.path.join(self.destdir, 'srcfile')), {}))
+            self.assertEqual(step.uploadDone.call_args_list[1],
+                             ((SUCCESS, 'srcdir', os.path.join(self.destdir, 'srcdir')), {}))
+            self.assertEqual(step.allUploadsDone.call_count, 1)
+            self.assertEqual(step.allUploadsDone.call_args_list[0],
+                             ((SUCCESS, ['srcfile', 'srcdir'], self.destdir), {}))
 
-        return d
+    def test_init_workersrcs_keyword(self):
+        step = transfer.MultipleFileUpload(
+            workersrcs=['srcfile'], masterdest='dstfile')
+
+        self.assertEqual(step.workersrcs, ['srcfile'])
+
+    def test_init_workersrcs_positional(self):
+        step = transfer.MultipleFileUpload(['srcfile'], 'dstfile')
+
+        self.assertEqual(step.workersrcs, ['srcfile'])
+
+    def test_init_positional_args(self):
+        with self.assertRaises(TypeError):
+            transfer.MultipleFileUpload()
+        with self.assertRaises(TypeError):
+            transfer.MultipleFileUpload(['srcfile'])
 
 
-class TestStringDownload(unittest.TestCase):
+class TestFileDownload(steps.BuildStepMixin, TestReactorMixin,
+                       unittest.TestCase):
+
+    def setUp(self):
+        self.setUpTestReactor()
+        fd, self.destfile = tempfile.mkstemp()
+        os.close(fd)
+        os.unlink(self.destfile)
+        return self.setUpBuildStep()
+
+    def tearDown(self):
+        if os.path.exists(self.destfile):
+            os.unlink(self.destfile)
+        return self.tearDownBuildStep()
+
+    def test_init_workerdest_keyword(self):
+        step = transfer.FileDownload(
+            mastersrc='srcfile', workerdest='dstfile')
+
+        self.assertEqual(step.workerdest, 'dstfile')
+
+    def test_init_workerdest_positional(self):
+        step = transfer.FileDownload('srcfile', 'dstfile')
+
+        self.assertEqual(step.workerdest, 'dstfile')
+
+    def test_init_positional_args(self):
+        with self.assertRaises(TypeError):
+            transfer.FileDownload()
+        with self.assertRaises(TypeError):
+            transfer.FileDownload('srcfile')
+
+    @defer.inlineCallbacks
+    def testBasic(self):
+        master_file = __file__
+        self.setupStep(
+            transfer.FileDownload(
+                mastersrc=master_file, workerdest=self.destfile))
+
+        # A place to store what gets read
+        read = []
+
+        self.expectCommands(
+            Expect('downloadFile', dict(
+                workerdest=self.destfile, workdir='wkdir',
+                blocksize=16384, maxsize=None, mode=None,
+                reader=ExpectRemoteRef(remotetransfer.FileReader)))
+            + Expect.behavior(downloadString(read.append))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS,
+            state_string="downloading to {0}".format(
+                os.path.basename(self.destfile)))
+        yield self.runStep()
+
+        with open(master_file, "rb") as f:
+            contents = f.read()
+        # Only first 1000 bytes transferred in downloadString() helper
+        contents = contents[:1000]
+        self.assertEqual(b''.join(read), contents)
+
+    @defer.inlineCallbacks
+    def testBasicWorker2_16(self):
+        master_file = __file__
+        self.setupStep(
+            transfer.FileDownload(
+                mastersrc=master_file, workerdest=self.destfile),
+            worker_version={'*': '2.16'})
+
+        # A place to store what gets read
+        read = []
+
+        self.expectCommands(
+            Expect('downloadFile', dict(
+                slavedest=self.destfile, workdir='wkdir',
+                blocksize=16384, maxsize=None, mode=None,
+                reader=ExpectRemoteRef(remotetransfer.FileReader)))
+            + Expect.behavior(downloadString(read.append))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS,
+            state_string="downloading to {0}".format(
+                os.path.basename(self.destfile)))
+        yield self.runStep()
+
+        def checkCalls(res):
+            with open(master_file, "rb") as f:
+                contents = f.read()
+            # Only first 1000 bytes transferred in downloadString() helper
+            contents = contents[:1000]
+            self.assertEqual(b''.join(read), contents)
+
+
+class TestStringDownload(steps.BuildStepMixin, TestReactorMixin,
+                         unittest.TestCase):
+
+    def setUp(self):
+        self.setUpTestReactor()
+        return self.setUpBuildStep()
+
+    def tearDown(self):
+        return self.tearDownBuildStep()
 
     # check that ConfigErrors is raised on invalid 'mode' argument
 
     def testModeConfError(self):
-        self.assertRaisesRegexp(
-            config.ConfigErrors,
-            "StringDownload step's mode must be an integer or None,"
-            " got 'not-a-number'",
-            transfer.StringDownload,
-            "string", "file", mode="not-a-number")
+        with self.assertRaisesRegex(config.ConfigErrors,
+                                    "StringDownload step's mode must be an integer or None,"
+                                    " got 'not-a-number'"):
+            transfer.StringDownload("string", "file", mode="not-a-number")
 
+    @defer.inlineCallbacks
     def testBasic(self):
-        s = transfer.StringDownload("Hello World", "hello.txt")
-        s.build = Mock()
-        s.build.getProperties.return_value = Properties()
-        s.build.getSlaveCommandVersion.return_value = 1
+        self.setupStep(transfer.StringDownload("Hello World", "hello.txt"))
 
-        s.step_status = Mock()
-        s.buildslave = Mock()
-        s.remote = Mock()
+        self.step.worker = Mock()
+        self.step.remote = Mock()
 
-        s.start()
+        # A place to store what gets read
+        read = []
 
-        for c in s.remote.method_calls:
-            name, command, args = c
-            commandName = command[3]
-            kwargs = command[-1]
-            if commandName == 'downloadFile':
-                self.assertEquals(kwargs['slavedest'], 'hello.txt')
-                reader = kwargs['reader']
-                data = reader.remote_read(100)
-                self.assertEquals(data, "Hello World")
-                break
-        else:
-            self.assert_(False, "No downloadFile command found")
+        self.expectCommands(
+            Expect('downloadFile', dict(
+                workerdest="hello.txt", workdir='wkdir',
+                blocksize=16384, maxsize=None, mode=None,
+                reader=ExpectRemoteRef(remotetransfer.StringFileReader)))
+            + Expect.behavior(downloadString(read.append))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS, state_string="downloading to hello.txt")
+        yield self.runStep()
+
+        def checkCalls(res):
+            self.assertEqual(b''.join(read), b"Hello World")
+
+    @defer.inlineCallbacks
+    def testBasicWorker2_16(self):
+        self.setupStep(
+            transfer.StringDownload("Hello World", "hello.txt"),
+            worker_version={'*': '2.16'})
+
+        self.step.worker = Mock()
+        self.step.remote = Mock()
+
+        # A place to store what gets read
+        read = []
+
+        self.expectCommands(
+            Expect('downloadFile', dict(
+                slavedest="hello.txt", workdir='wkdir',
+                blocksize=16384, maxsize=None, mode=None,
+                reader=ExpectRemoteRef(remotetransfer.StringFileReader)))
+            + Expect.behavior(downloadString(read.append))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS, state_string="downloading to hello.txt")
+        yield self.runStep()
+
+        self.assertEqual(b''.join(read), b"Hello World")
+
+    def testFailure(self):
+        self.setupStep(transfer.StringDownload("Hello World", "hello.txt"))
+
+        self.expectCommands(
+            Expect('downloadFile', dict(
+                workerdest="hello.txt", workdir='wkdir',
+                blocksize=16384, maxsize=None, mode=None,
+                reader=ExpectRemoteRef(remotetransfer.StringFileReader)))
+            + 1)
+
+        self.expectOutcome(
+            result=FAILURE, state_string="downloading to hello.txt (failure)")
+        return self.runStep()
+
+    def test_init_workerdest_keyword(self):
+        step = transfer.StringDownload('srcfile', workerdest='dstfile')
+
+        self.assertEqual(step.workerdest, 'dstfile')
+
+    def test_init_workerdest_positional(self):
+        step = transfer.StringDownload('srcfile', 'dstfile')
+
+        self.assertEqual(step.workerdest, 'dstfile')
+
+    def test_init_positional_args(self):
+        with self.assertRaises(TypeError):
+            transfer.StringDownload()
+        with self.assertRaises(TypeError):
+            transfer.StringDownload('srcfile')
 
 
-class TestJSONStringDownload(unittest.TestCase):
+class TestJSONStringDownload(steps.BuildStepMixin, TestReactorMixin,
+                             unittest.TestCase):
 
+    def setUp(self):
+        self.setUpTestReactor()
+        return self.setUpBuildStep()
+
+    def tearDown(self):
+        return self.tearDownBuildStep()
+
+    @defer.inlineCallbacks
     def testBasic(self):
         msg = dict(message="Hello World")
-        s = transfer.JSONStringDownload(msg, "hello.json")
-        s.build = Mock()
-        s.build.getProperties.return_value = Properties()
-        s.build.getSlaveCommandVersion.return_value = 1
+        self.setupStep(transfer.JSONStringDownload(msg, "hello.json"))
 
-        s.step_status = Mock()
-        s.buildslave = Mock()
-        s.remote = Mock()
+        self.step.worker = Mock()
+        self.step.remote = Mock()
 
-        s.start()
+        # A place to store what gets read
+        read = []
 
-        for c in s.remote.method_calls:
-            name, command, args = c
-            commandName = command[3]
-            kwargs = command[-1]
-            if commandName == 'downloadFile':
-                self.assertEquals(kwargs['slavedest'], 'hello.json')
-                reader = kwargs['reader']
-                data = reader.remote_read(100)
-                self.assertEquals(data, json.dumps(msg))
-                break
-        else:
-            self.assert_(False, "No downloadFile command found")
+        self.expectCommands(
+            Expect('downloadFile', dict(
+                workerdest="hello.json", workdir='wkdir',
+                blocksize=16384, maxsize=None, mode=None,
+                reader=ExpectRemoteRef(remotetransfer.StringFileReader))
+            )
+            + Expect.behavior(downloadString(read.append))
+            + 0)
+
+        self.expectOutcome(
+            result=SUCCESS, state_string="downloading to hello.json")
+        yield self.runStep()
+
+        self.assertEqual(b''.join(read), b'{"message": "Hello World"}')
+
+    def testFailure(self):
+        msg = dict(message="Hello World")
+        self.setupStep(transfer.JSONStringDownload(msg, "hello.json"))
+
+        self.expectCommands(
+            Expect('downloadFile', dict(
+                workerdest="hello.json", workdir='wkdir',
+                blocksize=16384, maxsize=None, mode=None,
+                reader=ExpectRemoteRef(remotetransfer.StringFileReader)))
+            + 1)
+
+        self.expectOutcome(
+            result=FAILURE, state_string="downloading to hello.json (failure)")
+        return self.runStep()
+
+    def test_init_workerdest_keyword(self):
+        step = transfer.JSONStringDownload('srcfile', workerdest='dstfile')
+
+        self.assertEqual(step.workerdest, 'dstfile')
+
+    def test_init_workerdest_positional(self):
+        step = transfer.JSONStringDownload('srcfile', 'dstfile')
+
+        self.assertEqual(step.workerdest, 'dstfile')
+
+    def test_init_positional_args(self):
+        with self.assertRaises(TypeError):
+            transfer.JSONStringDownload()
+        with self.assertRaises(TypeError):
+            transfer.JSONStringDownload('srcfile')
 
 
-class TestJSONPropertiesDownload(unittest.TestCase):
+class TestJSONPropertiesDownload(steps.BuildStepMixin, TestReactorMixin, unittest.TestCase):
 
+    def setUp(self):
+        self.setUpTestReactor()
+        return self.setUpBuildStep()
+
+    def tearDown(self):
+        return self.tearDownBuildStep()
+
+    @defer.inlineCallbacks
     def testBasic(self):
-        s = transfer.JSONPropertiesDownload("props.json")
-        s.build = Mock()
-        props = Properties()
-        props.setProperty('key1', 'value1', 'test')
-        s.build.getProperties.return_value = props
-        s.build.getSlaveCommandVersion.return_value = 1
-        ss = Mock()
-        ss.asDict.return_value = dict(revision="12345")
-        s.build.getSourceStamp.return_value = ss
+        self.setupStep(transfer.JSONPropertiesDownload("props.json"))
+        self.step.build.setProperty('key1', 'value1', 'test')
+        read = []
+        self.expectCommands(
+            Expect('downloadFile', dict(
+                workerdest="props.json", workdir='wkdir',
+                blocksize=16384, maxsize=None, mode=None,
+                reader=ExpectRemoteRef(remotetransfer.StringFileReader))
+            )
+            + Expect.behavior(downloadString(read.append))
+            + 0)
 
-        s.step_status = Mock()
-        s.buildslave = Mock()
-        s.remote = Mock()
+        self.expectOutcome(
+            result=SUCCESS, state_string="downloading to props.json")
+        yield self.runStep()
+        # we decode as key order is dependent of python version
+        self.assertEqual(json.loads((b''.join(read)).decode()), {
+                         "properties": {"key1": "value1"}, "sourcestamps": []})
 
-        s.start()
+    def test_init_workerdest_keyword(self):
+        step = transfer.JSONPropertiesDownload(workerdest='dstfile')
 
-        for c in s.remote.method_calls:
-            name, command, args = c
-            commandName = command[3]
-            kwargs = command[-1]
-            if commandName == 'downloadFile':
-                self.assertEquals(kwargs['slavedest'], 'props.json')
-                reader = kwargs['reader']
-                data = reader.remote_read(100)
-                self.assertEquals(
-                    data, json.dumps(dict(sourcestamp=ss.asDict(), properties={'key1': 'value1'})))
-                break
-        else:
-            self.assert_(False, "No downloadFile command found")
+        self.assertEqual(step.workerdest, 'dstfile')
+
+    def test_init_workerdest_positional(self):
+        step = transfer.JSONPropertiesDownload('dstfile')
+
+        self.assertEqual(step.workerdest, 'dstfile')
+
+    def test_init_positional_args(self):
+        with self.assertRaises(TypeError):
+            transfer.JSONPropertiesDownload()

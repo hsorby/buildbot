@@ -14,14 +14,14 @@
 # Copyright Buildbot Team Members
 
 
-from StringIO import StringIO
-from buildbot.process import logobserver
-from buildbot.status.results import FAILURE
-from buildbot.status.results import SKIPPED
-from buildbot.status.results import SUCCESS
-from buildbot.status.testresult import TestResult as aTestResult
-from buildbot.steps.shell import ShellCommand
 from unittest import TestResult
+
+from twisted.python.compat import NativeStringIO
+
+from buildbot.process import logobserver
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
+from buildbot.steps.shell import ShellCommand
 
 
 class SubunitLogObserver(logobserver.LogLineObserver, TestResult):
@@ -33,8 +33,7 @@ class SubunitLogObserver(logobserver.LogLineObserver, TestResult):
     """
 
     def __init__(self):
-        logobserver.LogLineObserver.__init__(self)
-        TestResult.__init__(self)
+        super().__init__()
         try:
             from subunit import TestProtocolServer, PROGRESS_CUR, PROGRESS_SET
             from subunit import PROGRESS_PUSH, PROGRESS_POP
@@ -45,7 +44,7 @@ class SubunitLogObserver(logobserver.LogLineObserver, TestResult):
         self.PROGRESS_SET = PROGRESS_SET
         self.PROGRESS_PUSH = PROGRESS_PUSH
         self.PROGRESS_POP = PROGRESS_POP
-        self.warningio = StringIO()
+        self.warningio = NativeStringIO()
         self.protocol = TestProtocolServer(self, self.warningio)
         self.skips = []
         self.seen_tags = set()  # don't yet know what tags does in subunit
@@ -60,40 +59,27 @@ class SubunitLogObserver(logobserver.LogLineObserver, TestResult):
         self.protocol.lineReceived(line + '\n')
 
     def stopTest(self, test):
-        TestResult.stopTest(self, test)
+        super().stopTest(test)
         self.step.setProgress('tests', self.testsRun)
-
-    def addSuccess(self, test):
-        TestResult.addSuccess(self, test)
-        self.addAResult(test, SUCCESS, 'SUCCESS')
 
     def addSkip(self, test, detail):
         if hasattr(TestResult, 'addSkip'):
-            TestResult.addSkip(self, test, detail)
+            super().addSkip(test, detail)
         else:
             self.skips.append((test, detail))
-        self.addAResult(test, SKIPPED, 'SKIPPED', detail)
 
     def addError(self, test, err):
-        TestResult.addError(self, test, err)
+        super().addError(test, err)
         self.issue(test, err)
 
     def addFailure(self, test, err):
-        TestResult.addFailure(self, test, err)
+        super().addFailure(test, err)
         self.issue(test, err)
-
-    def addAResult(self, test, result, text, log=""):
-        tr = aTestResult(tuple(test.id().split('.')), result, text, log)
-        self.step.build.build_status.addTestResult(tr)
 
     def issue(self, test, err):
         """An issue - failing, erroring etc test."""
-        self.addAResult(test, FAILURE, 'FAILURE', err)
         self.step.setProgress('tests failed', len(self.failures) +
                               len(self.errors))
-
-    expectedTests = 0
-    contextLevel = 0
 
     def tags(self, new_tags, gone_tags):
         """Accumulate the seen tags."""
@@ -106,7 +92,7 @@ class SubunitShellCommand(ShellCommand):
     """
 
     def __init__(self, failureOnNoTests=False, *args, **kwargs):
-        ShellCommand.__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.failureOnNoTests = failureOnNoTests
 
         self.ioObserver = SubunitLogObserver()

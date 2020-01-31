@@ -13,16 +13,22 @@
 #
 # Copyright Buildbot Team Members
 
+
 import os
-import sqlalchemy as sa
+
+from sqlalchemy.schema import MetaData
+
+from twisted.internet import defer
+from twisted.internet import reactor
+from twisted.python import log
+from twisted.trial import unittest
 
 from buildbot.db import enginestrategy
 from buildbot.db import model
 from buildbot.db import pool
-from sqlalchemy.schema import MetaData
-from twisted.internet import defer
-from twisted.python import log
-from twisted.trial import unittest
+from buildbot.db.connector import DBConnector
+from buildbot.util.sautils import sa_version
+from buildbot.util.sautils import withoutSqliteForeignKeys
 
 
 def skip_for_dialect(dialect):
@@ -37,7 +43,7 @@ def skip_for_dialect(dialect):
     return dec
 
 
-class RealDatabaseMixin(object):
+class RealDatabaseMixin:
 
     """
     A class that sets up a real database for testing.  This sets self.db_url to
@@ -52,30 +58,100 @@ class RealDatabaseMixin(object):
     @ivar db_url: the DB URL used to run these tests
 
     @ivar db_engine: the engine created for the test database
+
+    Note that this class uses the production database model.  A
+    re-implementation would be virtually identical and just require extra
+    work to keep synchronized.
+
+    Similarly, this class uses the production DB thread pool.  This achieves
+    a few things:
+     - affords more thorough tests for the pool
+     - avoids repetitive implementation
+     - cooperates better at runtime with thread-sensitive DBAPI's
+
+    Finally, it duplicates initialization performed in db.connector.DBConnector.setup().
+    Never call that method in tests that use RealDatabaseMixin, use
+    RealDatabaseWithConnectorMixin.
     """
 
-    # Note that this class uses the production database model.  A
-    # re-implementation would be virtually identical and just require extra
-    # work to keep synchronized.
-
-    # Similarly, this class uses the production DB thread pool.  This achieves
-    # a few things:
-    #  - affords more thorough tests for the pool
-    #  - avoids repetitive implementation
-    #  - cooperates better at runtime with thread-sensitive DBAPI's
-
     def __thd_clean_database(self, conn):
-        # drop the known tables, although sometimes this misses dependencies
-        try:
-            model.Model.metadata.drop_all(bind=conn, checkfirst=True)
-        except sa.exc.ProgrammingError:
-            pass
+        # In general it's nearly impossible to do "bullet proof" database
+        # cleanup with SQLAlchemy that will work on a range of databases
+        # and they configurations.
+        #
+        # Following approaches were considered.
+        #
+        # 1. Drop Buildbot Model schema:
+        #
+        #     model.Model.metadata.drop_all(bind=conn, checkfirst=True)
+        #
+        # Dropping schema from model is correct and working operation only
+        # if database schema is exactly corresponds to the model schema.
+        #
+        # If it is not (e.g. migration script failed or migration results in
+        # old version of model), then some tables outside model schema may be
+        # present, which may reference tables in the model schema.
+        # In this case either dropping model schema will fail (if database
+        # enforces referential integrity, e.g. PostgreSQL), or
+        # dropping left tables in the code below will fail (if database allows
+        # removing of tables on which other tables have references,
+        # e.g. SQLite).
+        #
+        # 2. Introspect database contents and drop found tables.
+        #
+        #     meta = MetaData(bind=conn)
+        #     meta.reflect()
+        #     meta.drop_all()
+        #
+        # May fail if schema contains reference cycles (and Buildbot schema
+        # has them). Reflection looses metadata about how reference cycles
+        # can be teared up (e.g. use_alter=True).
+        # Introspection may fail if schema has invalid references
+        # (e.g. possible in SQLite).
+        #
+        # 3. What is actually needed here is accurate code for each engine
+        # and each engine configuration that will drop all tables,
+        # indexes, constraints, etc in proper order or in a proper way
+        # (using tables alternation, or DROP TABLE ... CASCADE, etc).
+        #
+        # Conclusion: use approach 2 with manually teared apart known
+        # reference cycles.
 
-        # see if we can find any other tables to drop
+        # pylint: disable=too-many-nested-blocks
+
         try:
             meta = MetaData(bind=conn)
+
+            # Reflect database contents. May fail, e.g. if table references
+            # non-existent table in SQLite.
             meta.reflect()
-            meta.drop_all()
+
+            # Table.foreign_key_constraints introduced in SQLAlchemy 1.0.
+            if sa_version()[:2] >= (1, 0):
+                # Restore `use_alter` settings to break known reference cycles.
+                # Main goal of this part is to remove SQLAlchemy warning
+                # about reference cycle.
+                # Looks like it's OK to do it only with SQLAlchemy >= 1.0.0,
+                # since it's not issued in SQLAlchemy == 0.8.0
+
+                # List of reference links (table_name, ref_table_name) that
+                # should be broken by adding use_alter=True.
+                table_referenced_table_links = [
+                    ('buildsets', 'builds'), ('builds', 'buildrequests')]
+                for table_name, ref_table_name in table_referenced_table_links:
+                    if table_name in meta.tables:
+                        table = meta.tables[table_name]
+                        for fkc in table.foreign_key_constraints:
+                            if fkc.referred_table.name == ref_table_name:
+                                fkc.use_alter = True
+
+            # Drop all reflected tables and indices. May fail, e.g. if
+            # SQLAlchemy wouldn't be able to break circular references.
+            # Sqlalchemy fk support with sqlite is not yet perfect, so we must deactivate fk during that
+            # operation, even though we made our possible to use use_alter
+            with withoutSqliteForeignKeys(conn.engine, conn):
+                meta.drop_all()
+
         except Exception:
             # sometimes this goes badly wrong; being able to see the schema
             # can be a big help
@@ -88,14 +164,17 @@ class RealDatabaseMixin(object):
             raise
 
     def __thd_create_tables(self, conn, table_names):
-        all_table_names = set(table_names)
-        ordered_tables = [t for t in model.Model.metadata.sorted_tables
-                          if t.name in all_table_names]
+        table_names_set = set(table_names)
+        tables = [t for t in model.Model.metadata.tables.values()
+                  if t.name in table_names_set]
+        # Create tables using create_all() method. This way not only tables
+        # and direct indices are created, but also deferred references
+        # (that use use_alter=True in definition).
+        model.Model.metadata.create_all(
+            bind=conn, tables=tables, checkfirst=True)
 
-        for tbl in ordered_tables:
-            tbl.create(bind=conn, checkfirst=True)
-
-    def setUpRealDatabase(self, table_names=[], basedir='basedir',
+    @defer.inlineCallbacks
+    def setUpRealDatabase(self, table_names=None, basedir='basedir',
                           want_pool=True, sqlite_memory=True):
         """
 
@@ -110,36 +189,38 @@ class RealDatabaseMixin(object):
         @param sqlite_memory: (optional) False to avoid using an in-memory db
         @returns: Deferred
         """
+        if table_names is None:
+            table_names = []
         self.__want_pool = want_pool
 
-        default = 'sqlite://'
-        if not sqlite_memory:
-            default = "sqlite:///tmp.sqlite"
-            if not os.path.exists(basedir):
-                os.makedirs(basedir)
+        default_sqlite = 'sqlite://'
+        self.db_url = os.environ.get('BUILDBOT_TEST_DB_URL', default_sqlite)
+        if not sqlite_memory and self.db_url == default_sqlite:
+            self.db_url = "sqlite:///tmp.sqlite"
 
-        self.db_url = os.environ.get('BUILDBOT_TEST_DB_URL', default)
+        if not os.path.exists(basedir):
+            os.makedirs(basedir)
 
+        self.basedir = basedir
         self.db_engine = enginestrategy.create_engine(self.db_url,
                                                       basedir=basedir)
         # if the caller does not want a pool, we're done.
         if not want_pool:
-            return defer.succeed(None)
+            return None
 
-        self.db_pool = pool.DBThreadPool(self.db_engine)
+        self.db_pool = pool.DBThreadPool(self.db_engine, reactor=reactor)
 
         log.msg("cleaning database %s" % self.db_url)
-        d = self.db_pool.do(self.__thd_clean_database)
-        d.addCallback(lambda _:
-                      self.db_pool.do(self.__thd_create_tables, table_names))
-        return d
+        yield self.db_pool.do(self.__thd_clean_database)
+        yield self.db_pool.do(self.__thd_create_tables, table_names)
 
+    @defer.inlineCallbacks
     def tearDownRealDatabase(self):
         if self.__want_pool:
-            return self.db_pool.do(self.__thd_clean_database)
-        else:
-            return defer.succeed(None)
+            yield self.db_pool.do(self.__thd_clean_database)
+            yield self.db_pool.shutdown()
 
+    @defer.inlineCallbacks
     def insertTestData(self, rows):
         """Insert test data into the database for use during the test.
 
@@ -149,7 +230,7 @@ class RealDatabaseMixin(object):
         @returns: Deferred
         """
         # sort the tables by dependency
-        all_table_names = set([row.table for row in rows])
+        all_table_names = {row.table for row in rows}
         ordered_tables = [t for t in model.Model.metadata.sorted_tables
                           if t.name in all_table_names]
 
@@ -163,4 +244,33 @@ class RealDatabaseMixin(object):
                     except Exception:
                         log.msg("while inserting %s - %s" % (row, row.values))
                         raise
-        return self.db_pool.do(thd)
+        yield self.db_pool.do(thd)
+
+
+class RealDatabaseWithConnectorMixin(RealDatabaseMixin):
+    # Same as RealDatabaseMixin, except that a real DBConnector is also setup in a correct way.
+
+    @defer.inlineCallbacks
+    def setUpRealDatabaseWithConnector(self, master, table_names=None, basedir='basedir',
+                                       want_pool=True, sqlite_memory=True):
+        yield self.setUpRealDatabase(table_names, basedir, want_pool, sqlite_memory)
+        master.config.db['db_url'] = self.db_url
+        master.db = DBConnector(self.basedir)
+        yield master.db.setServiceParent(master)
+        master.db.pool = self.db_pool
+
+    def tearDownRealDatabaseWithConnector(self):
+        return self.tearDownRealDatabase()
+
+
+class TestCase(unittest.TestCase):
+
+    @defer.inlineCallbacks
+    def assertFailure(self, d, excp):
+        exception = None
+        try:
+            yield d
+        except Exception as e:
+            exception = e
+        self.assertIsInstance(exception, excp)
+        self.flushLoggedErrors(excp)

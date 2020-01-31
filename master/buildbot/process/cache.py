@@ -60,15 +60,14 @@ class CacheManager(service.ReconfigurableServiceMixin, service.AsyncService):
 
     def reconfigServiceWithBuildbotConfig(self, new_config):
         self.config = new_config.caches
-        for name, cache in self._caches.iteritems():
+        for name, cache in self._caches.items():
             cache.set_max_size(new_config.caches.get(name,
                                                      self.DEFAULT_CACHE_SIZE))
 
-        return service.ReconfigurableServiceMixin.reconfigServiceWithBuildbotConfig(self,
-                                                                                    new_config)
+        return super().reconfigServiceWithBuildbotConfig(new_config)
 
     def get_metrics(self):
-        return dict([
-            (n, dict(hits=c.hits, refhits=c.refhits,
-                     misses=c.misses, max_size=c.max_size))
-            for n, c in self._caches.iteritems()])
+        return {
+            n: {'hits': c.hits, 'refhits': c.refhits,
+                'misses': c.misses, 'max_size': c.max_size}
+            for n, c in self._caches.items()}

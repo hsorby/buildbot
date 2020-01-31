@@ -13,7 +13,6 @@
 #
 # Copyright Buildbot Team Members
 
-from __future__ import with_statement
 
 from buildbot.scripts import base
 from buildbot.scripts import start
@@ -30,5 +29,5 @@ def restart(config):
     if stop.stop(config, wait=True) != 0:
         return 1
     if not quiet:
-        print "now restarting buildbot process.."
+        print("now restarting buildbot process..")
     return start.start(config)

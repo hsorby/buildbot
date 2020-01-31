@@ -13,17 +13,22 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.util import service
+
 from twisted.application import strports
 from twisted.cred import checkers
 from twisted.cred import credentials
 from twisted.cred import error
 from twisted.cred import portal
 from twisted.internet import defer
-from twisted.python import failure
 from twisted.python import log
 from twisted.spread import pb
-from zope.interface import implements
+from zope.interface import implementer
+
+from buildbot.process.properties import Properties
+from buildbot.util import bytes2unicode
+from buildbot.util import service
+from buildbot.util import unicode2bytes
+from buildbot.util.eventual import eventually
 
 debug = False
 
@@ -38,10 +43,11 @@ class PBManager(service.AsyncMultiService):
     """
 
     def __init__(self):
-        service.AsyncMultiService.__init__(self)
+        super().__init__()
         self.setName('pbmanager')
         self.dispatchers = {}
 
+    @defer.inlineCallbacks
     def register(self, portstr, username, password, pfactory):
         """
         Register a perspective factory PFACTORY to be executed when a PB
@@ -56,7 +62,7 @@ class PBManager(service.AsyncMultiService):
 
         if portstr not in self.dispatchers:
             disp = self.dispatchers[portstr] = Dispatcher(portstr)
-            disp.setServiceParent(self)
+            yield disp.setServiceParent(self)
         else:
             disp = self.dispatchers[portstr]
 
@@ -64,6 +70,7 @@ class PBManager(service.AsyncMultiService):
 
         return reg
 
+    @defer.inlineCallbacks
     def _unregister(self, registration):
         disp = self.dispatchers[registration.portstr]
         disp.unregister(registration.username)
@@ -71,11 +78,10 @@ class PBManager(service.AsyncMultiService):
         if not disp.users:
             disp = self.dispatchers[registration.portstr]
             del self.dispatchers[registration.portstr]
-            return defer.maybeDeferred(disp.disownServiceParent)
-        return defer.succeed(None)
+            yield disp.disownServiceParent()
 
 
-class Registration(object):
+class Registration:
 
     def __init__(self, pbmanager, portstr, username):
         self.portstr = portstr
@@ -106,8 +112,8 @@ class Registration(object):
         return disp.port.getHost().port
 
 
+@implementer(portal.IRealm, checkers.ICredentialsChecker)
 class Dispatcher(service.AsyncService):
-    implements(portal.IRealm, checkers.ICredentialsChecker)
 
     credentialInterfaces = [credentials.IUsernamePassword,
                             credentials.IUsernameHashedPassword]
@@ -121,17 +127,24 @@ class Dispatcher(service.AsyncService):
         self.portal.registerChecker(self)
         self.serverFactory = pb.PBServerFactory(self.portal)
         self.serverFactory.unsafeTracebacks = True
-        self.port = strports.listen(portstr, self.serverFactory)
+        self.port = None
 
     def __repr__(self):
         return "<pbmanager.Dispatcher for %s on %s>" % \
-            (", ".join(self.users.keys()), self.portstr)
+            (", ".join(list(self.users)), self.portstr)
 
+    def startService(self):
+        assert not self.port
+        self.port = strports.listen(self.portstr, self.serverFactory)
+        return super().startService()
+
+    @defer.inlineCallbacks
     def stopService(self):
         # stop listening on the port when shut down
-        d = defer.maybeDeferred(self.port.stopListening)
-        d.addCallback(lambda _: service.AsyncService.stopService(self))
-        return d
+        assert self.port
+        port, self.port = self.port, None
+        yield defer.maybeDeferred(port.stopListening)
+        yield super().stopService()
 
     def register(self, username, password, pfactory):
         if debug:
@@ -152,6 +165,7 @@ class Dispatcher(service.AsyncService):
 
     def requestAvatar(self, username, mind, interface):
         assert interface == pb.IPerspective
+        username = bytes2unicode(username)
         if username not in self.users:
             d = defer.succeed(None)  # no perspective
         else:
@@ -159,40 +173,47 @@ class Dispatcher(service.AsyncService):
             d = defer.maybeDeferred(afactory, mind, username)
 
         # check that we got a perspective
+        @d.addCallback
         def check(persp):
             if not persp:
                 raise ValueError("no perspective for '%s'" % username)
             return persp
-        d.addCallback(check)
 
         # call the perspective's attached(mind)
+        @d.addCallback
         def call_attached(persp):
             d = defer.maybeDeferred(persp.attached, mind)
             d.addCallback(lambda _: persp)  # keep returning the perspective
             return d
-        d.addCallback(call_attached)
 
         # return the tuple requestAvatar is expected to return
+        @d.addCallback
         def done(persp):
             return (pb.IPerspective, persp, lambda: persp.detached(mind))
-        d.addCallback(done)
 
         return d
 
     # ICredentialsChecker
 
+    @defer.inlineCallbacks
     def requestAvatarId(self, creds):
-        if creds.username in self.users:
-            password, _ = self.users[creds.username]
-            d = defer.maybeDeferred(creds.checkPassword, password)
-
-            def check(matched):
+        p = Properties()
+        p.master = self.master
+        username = bytes2unicode(creds.username)
+        try:
+            yield self.master.initLock.acquire()
+            if username in self.users:
+                password, _ = self.users[username]
+                password = yield p.render(password)
+                matched = yield defer.maybeDeferred(
+                    creds.checkPassword, unicode2bytes(password))
                 if not matched:
-                    log.msg("invalid login from user '%s'" % creds.username)
-                    return failure.Failure(error.UnauthorizedLogin())
+                    log.msg("invalid login from user '{}'".format(username))
+                    raise error.UnauthorizedLogin()
                 return creds.username
-            d.addCallback(check)
-            return d
-        else:
-            log.msg("invalid login from unknown user '%s'" % creds.username)
-            return defer.fail(error.UnauthorizedLogin())
+            log.msg("invalid login from unknown user '{}'".format(username))
+            raise error.UnauthorizedLogin()
+        finally:
+            # brake the callback stack by returning to the reactor
+            # before waking up other waiters
+            eventually(self.master.initLock.release)

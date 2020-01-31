@@ -15,13 +15,18 @@
 
 import mock
 
+from twisted.trial import unittest
+
 from buildbot.data import base
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import endpoint
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
 
 
-class ResourceType(unittest.TestCase):
+class ResourceType(TestReactorMixin, unittest.TestCase):
+
+    def setUp(self):
+        self.setUpTestReactor()
 
     def makeResourceTypeSubclass(self, **attributes):
         attributes.setdefault('name', 'thing')
@@ -37,7 +42,8 @@ class ResourceType(unittest.TestCase):
         ep = base.Endpoint(None, None)
         cls = self.makeResourceTypeSubclass(endpoints=[ep])
         inst = cls(None)
-        self.assertRaises(TypeError, lambda: inst.getEndpoints())
+        with self.assertRaises(TypeError):
+            inst.getEndpoints()
 
     def test_getEndpoints_classes(self):
         class MyEndpoint(base.Endpoint):
@@ -53,7 +59,7 @@ class ResourceType(unittest.TestCase):
         cls = self.makeResourceTypeSubclass(
             name='singular',
             eventPathPatterns="/foo/:fooid/bar/:barid")
-        master = fakemaster.make_master(testcase=self, wantMq=True)
+        master = fakemaster.make_master(self, wantMq=True)
         master.mq.verifyMessages = False  # since this is a pretend message
         inst = cls(master)
         inst.produceEvent(dict(fooid=10, barid='20'),  # note integer vs. string
@@ -68,10 +74,11 @@ class ResourceType(unittest.TestCase):
                 /builder/:builderid/build/:number
                 /build/:buildid
             """
-        master = fakemaster.make_master(testcase=self, wantMq=True)
+        master = fakemaster.make_master(self, wantMq=True)
         master.mq.verifyMessages = False  # since this is a pretend message
         inst = MyResourceType(master)
-        self.assertEqual(inst.eventPaths, ['builder/{builderid}/build/{number}', 'build/{buildid}'])
+        self.assertEqual(
+            inst.eventPaths, ['builder/{builderid}/build/{number}', 'build/{buildid}'])
 
 
 class Endpoint(endpoint.EndpointMixin, unittest.TestCase):

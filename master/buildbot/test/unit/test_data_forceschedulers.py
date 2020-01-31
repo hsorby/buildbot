@@ -13,20 +13,24 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.data import forceschedulers
-from buildbot.schedulers.forcesched import ForceScheduler
-from buildbot.test.util import endpoint
+
 from twisted.internet import defer
 from twisted.trial import unittest
 
+from buildbot.data import forceschedulers
+from buildbot.schedulers.forcesched import ForceScheduler
+from buildbot.test.util import endpoint
 
 expected_default = {
     'all_fields': [{'columns': 1,
+                    'autopopulate': None,
                     'default': '',
                     'fields': [{'default': '',
+                                'autopopulate': None,
                                 'fullName': 'username',
                                 'hide': False,
                                 'label': 'Your name:',
+                                'maxsize': None,
                                 'multiple': False,
                                 'name': 'username',
                                 'need_email': True,
@@ -34,11 +38,13 @@ expected_default = {
                                 'required': False,
                                 'size': 30,
                                 'tablabel': 'Your name:',
-                                'type': 'text'},
+                                'type': 'username'},
                                {'default': 'force build',
+                                'autopopulate': None,
                                 'fullName': 'reason',
                                 'hide': False,
                                 'label': 'reason',
+                                'maxsize': None,
                                 'multiple': False,
                                 'name': 'reason',
                                 'regex': None,
@@ -50,6 +56,7 @@ expected_default = {
                     'hide': False,
                     'label': '',
                     'layout': 'vertical',
+                    'maxsize': None,
                     'multiple': False,
                     'name': '',
                     'regex': None,
@@ -59,9 +66,24 @@ expected_default = {
                    {'columns': 2,
                     'default': '',
                     'fields': [{'default': '',
+                                'autopopulate': None,
+                                'fullName': 'branch',
+                                'hide': False,
+                                'label': 'Branch:',
+                                'multiple': False,
+                                'maxsize': None,
+                                'name': 'branch',
+                                'regex': None,
+                                'required': False,
+                                'size': 10,
+                                'tablabel': 'Branch:',
+                                'type': 'text'},
+                               {'default': '',
+                                'autopopulate': None,
                                 'fullName': 'project',
                                 'hide': False,
                                 'label': 'Project:',
+                                'maxsize': None,
                                 'multiple': False,
                                 'name': 'project',
                                 'regex': None,
@@ -70,9 +92,11 @@ expected_default = {
                                 'tablabel': 'Project:',
                                 'type': 'text'},
                                {'default': '',
+                                'autopopulate': None,
                                 'fullName': 'repository',
                                 'hide': False,
                                 'label': 'Repository:',
+                                'maxsize': None,
                                 'multiple': False,
                                 'name': 'repository',
                                 'regex': None,
@@ -81,20 +105,11 @@ expected_default = {
                                 'tablabel': 'Repository:',
                                 'type': 'text'},
                                {'default': '',
-                                'fullName': 'branch',
-                                'hide': False,
-                                'label': 'Branch:',
-                                'multiple': False,
-                                'name': 'branch',
-                                'regex': None,
-                                'required': False,
-                                'size': 10,
-                                'tablabel': 'Branch:',
-                                'type': 'text'},
-                               {'default': '',
+                                'autopopulate': None,
                                 'fullName': 'revision',
                                 'hide': False,
                                 'label': 'Revision:',
+                                'maxsize': None,
                                 'multiple': False,
                                 'name': 'revision',
                                 'regex': None,
@@ -102,25 +117,30 @@ expected_default = {
                                 'size': 10,
                                 'tablabel': 'Revision:',
                                 'type': 'text'}],
+                    'autopopulate': None,
                     'fullName': None,
                     'hide': False,
                     'label': '',
                     'layout': 'vertical',
+                    'maxsize': None,
                     'multiple': False,
                     'name': '',
                     'regex': None,
                     'required': False,
                     'tablabel': '',
                     'type': 'nested'}],
-    'builder_names': [u'builder'],
-    'label': u'defaultforce',
-    'name': u'defaultforce'}
+    'builder_names': ['builder'],
+    'button_name': 'defaultforce',
+    'label': 'defaultforce',
+    'name': 'defaultforce',
+    'enabled': True}
 
 
 class ForceschedulerEndpoint(endpoint.EndpointMixin, unittest.TestCase):
 
     endpointClass = forceschedulers.ForceSchedulerEndpoint
     resourceTypeClass = forceschedulers.ForceScheduler
+    maxDiff = None
 
     def setUp(self):
         self.setUpEndpoint()
@@ -136,18 +156,19 @@ class ForceschedulerEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     def test_get_existing(self):
         res = yield self.callGet(('forceschedulers', "defaultforce"))
         self.validateData(res)
-        self.assertEquals(res, expected_default)
+        self.assertEqual(res, expected_default)
 
     @defer.inlineCallbacks
     def test_get_missing(self):
         res = yield self.callGet(('forceschedulers', 'foo'))
-        self.assertEquals(res, None)
+        self.assertEqual(res, None)
 
 
 class ForceSchedulersEndpoint(endpoint.EndpointMixin, unittest.TestCase):
 
     endpointClass = forceschedulers.ForceSchedulersEndpoint
     resourceTypeClass = forceschedulers.ForceScheduler
+    maxDiff = None
 
     def setUp(self):
         self.setUpEndpoint()
@@ -162,4 +183,4 @@ class ForceSchedulersEndpoint(endpoint.EndpointMixin, unittest.TestCase):
     @defer.inlineCallbacks
     def test_get_existing(self):
         res = yield self.callGet(('forceschedulers', ))
-        self.assertEquals(res, [expected_default])
+        self.assertEqual(res, [expected_default])

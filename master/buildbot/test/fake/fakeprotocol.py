@@ -13,33 +13,65 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.buildslave.protocols import base
+
 from twisted.internet import defer
+
+from buildbot.util import subscription
+from buildbot.worker.protocols import base
+
+
+class FakeTrivialConnection:
+
+    info = {}
+
+    def __init__(self):
+        self._disconnectSubs = subscription.SubscriptionPoint("disconnections from Fake")
+
+    def waitShutdown(self):
+        return defer.succeed(None)
+
+    def notifyOnDisconnect(self, cb):
+        return self._disconnectSubs.subscribe(cb)
+
+    def waitForNotifyDisconnectedDelivered(self):
+        return self._disconnectSubs.waitForDeliveriesToFinish()
+
+    def notifyDisconnected(self):
+        self._disconnectSubs.deliver()
+
+    def loseConnection(self):
+        self.notifyDisconnected()
+
+    def remoteSetBuilderList(self, builders):
+        return defer.succeed(None)
 
 
 class FakeConnection(base.Connection):
 
-    def __init__(self, master, buildslave):
-        base.Connection.__init__(self, master, buildslave)
+    def __init__(self, master, worker):
+        super().__init__(master, worker)
         self._connected = True
         self.remoteCalls = []
         self.builders = {}  # { name : isBusy }
 
         # users of the fake can add to this as desired
         self.info = {
-            'slave_commands': [],
-            'version': '0.8.2',
-            'basedir': '/sl',
+            'worker_commands': [],
+            'version': '0.9.0',
+            'basedir': '/w',
             'system': 'nt',
         }
+
+    def loseConnection(self):
+        self.notifyDisconnected()
 
     def remotePrint(self, message):
         self.remoteCalls.append(('remotePrint', message))
         return defer.succeed(None)
 
-    def remoteGetSlaveInfo(self):
-        self.remoteCalls.append(('remoteGetSlaveInfo',))
-        return defer.succeed(self.slaveInfo)
+    def remoteGetWorkerInfo(self):
+        self.remoteCalls.append(('remoteGetWorkerInfo',))
+        return defer.succeed(self.info)
 
     def remoteSetBuilderList(self, builders):
         self.remoteCalls.append(('remoteSetBuilderList', builders[:]))
@@ -59,6 +91,7 @@ class FakeConnection(base.Connection):
         self.remoteCalls.append(('remoteStartBuild', builderName))
         return defer.succeed(None)
 
-    def remoteInterruptCommand(self, commandId, why):
-        self.remoteCalls.append(('remoteInterruptCommand', commandId, why))
+    def remoteInterruptCommand(self, builderName, commandId, why):
+        self.remoteCalls.append(
+            ('remoteInterruptCommand', builderName, commandId, why))
         return defer.succeed(None)

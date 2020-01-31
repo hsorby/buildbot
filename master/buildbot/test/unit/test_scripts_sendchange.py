@@ -13,12 +13,13 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.clients import sendchange as sendchange_client
-from buildbot.scripts import sendchange
-from buildbot.test.util import misc
 from twisted.internet import defer
 from twisted.internet import reactor
 from twisted.trial import unittest
+
+from buildbot.clients import sendchange as sendchange_client
+from buildbot.scripts import sendchange
+from buildbot.test.util import misc
 
 
 class TestSendChange(misc.StdoutAssertionsMixin, unittest.TestCase):
@@ -57,70 +58,64 @@ class TestSendChange(misc.StdoutAssertionsMixin, unittest.TestCase):
 
         self.setUpStdoutAssertions()
 
+    @defer.inlineCallbacks
     def test_sendchange_config(self):
-        d = sendchange.sendchange(dict(encoding='utf16', who='me',
+        rc = yield sendchange.sendchange(dict(encoding='utf16', who='me',
                                        auth=['a', 'b'], master='m', branch='br', category='cat',
                                        revision='rr', properties={'a': 'b'}, repository='rep',
                                        project='prj', vc='git', revlink='rl', when=1234.0,
                                        comments='comm', files=('a', 'b'), codebase='cb'))
 
-        def check(rc):
-            self.assertEqual((self.sender.master, self.sender.auth,
-                              self.sender.encoding, self.sender.send_kwargs,
-                              self.getStdout(), rc),
-                             ('m', ['a', 'b'], 'utf16', {
-                                 'branch': 'br',
-                                 'category': 'cat',
-                                 'codebase': 'cb',
-                                 'comments': 'comm',
-                                 'files': ('a', 'b'),
-                                 'project': 'prj',
-                                 'properties': {'a': 'b'},
-                                 'repository': 'rep',
-                                 'revision': 'rr',
-                                 'revlink': 'rl',
-                                 'when': 1234.0,
-                                 'who': 'me',
-                                 'vc': 'git'},
-                                 'change sent successfully', 0))
-        d.addCallback(check)
-        return d
+        self.assertEqual((self.sender.master, self.sender.auth,
+                          self.sender.encoding, self.sender.send_kwargs,
+                          self.getStdout(), rc),
+                         ('m', ['a', 'b'], 'utf16', {
+                             'branch': 'br',
+                             'category': 'cat',
+                             'codebase': 'cb',
+                             'comments': 'comm',
+                             'files': ('a', 'b'),
+                             'project': 'prj',
+                             'properties': {'a': 'b'},
+                             'repository': 'rep',
+                             'revision': 'rr',
+                             'revlink': 'rl',
+                             'when': 1234.0,
+                             'who': 'me',
+                             'vc': 'git'},
+                             'change sent successfully', 0))
 
+    @defer.inlineCallbacks
     def test_sendchange_config_no_codebase(self):
-        d = sendchange.sendchange(dict(encoding='utf16', who='me',
+        rc = yield sendchange.sendchange(dict(encoding='utf16', who='me',
                                        auth=['a', 'b'], master='m', branch='br', category='cat',
                                        revision='rr', properties={'a': 'b'}, repository='rep',
                                        project='prj', vc='git', revlink='rl', when=1234.0,
                                        comments='comm', files=('a', 'b')))
 
-        def check(rc):
-            self.assertEqual((self.sender.master, self.sender.auth,
-                              self.sender.encoding, self.sender.send_kwargs,
-                              self.getStdout(), rc),
-                             ('m', ['a', 'b'], 'utf16', {
-                                 'branch': 'br',
-                                 'category': 'cat',
-                                 'codebase': None,
-                                 'comments': 'comm',
-                                 'files': ('a', 'b'),
-                                 'project': 'prj',
-                                 'properties': {'a': 'b'},
-                                 'repository': 'rep',
-                                 'revision': 'rr',
-                                 'revlink': 'rl',
-                                 'when': 1234.0,
-                                 'who': 'me',
-                                 'vc': 'git'},
-                                 'change sent successfully', 0))
-        d.addCallback(check)
-        return d
+        self.assertEqual((self.sender.master, self.sender.auth,
+                          self.sender.encoding, self.sender.send_kwargs,
+                          self.getStdout(), rc),
+                         ('m', ['a', 'b'], 'utf16', {
+                             'branch': 'br',
+                             'category': 'cat',
+                             'codebase': None,
+                             'comments': 'comm',
+                             'files': ('a', 'b'),
+                             'project': 'prj',
+                             'properties': {'a': 'b'},
+                             'repository': 'rep',
+                             'revision': 'rr',
+                             'revlink': 'rl',
+                             'when': 1234.0,
+                             'who': 'me',
+                             'vc': 'git'},
+                             'change sent successfully', 0))
 
+    @defer.inlineCallbacks
     def test_sendchange_fail(self):
         self.fail = True
-        d = sendchange.sendchange({})
+        rc = yield sendchange.sendchange({})
 
-        def check(rc):
-            self.assertEqual((self.getStdout().split('\n')[0], rc),
-                             ('change not sent:', 1))
-        d.addCallback(check)
-        return d
+        self.assertEqual((self.getStdout().split('\n')[0], rc),
+                         ('change not sent:', 1))

@@ -12,21 +12,37 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+"""
+Test clean shutdown functionality of the master
+"""
 
-# Test clean shutdown functionality of the master
 import mock
 
-from buildbot import pbmanager
 from twisted.cred import credentials
 from twisted.internet import defer
 from twisted.spread import pb
 from twisted.trial import unittest
 
+from buildbot import pbmanager
+
+
+class FakeMaster:
+    initLock = defer.DeferredLock()
+
+    def addService(self, svc):
+        pass
+
+    @property
+    def master(self):
+        return self
+
 
 class TestPBManager(unittest.TestCase):
 
+    @defer.inlineCallbacks
     def setUp(self):
         self.pbm = pbmanager.PBManager()
+        yield self.pbm.setServiceParent(FakeMaster())
         self.pbm.startService()
         self.connections = []
 
@@ -40,15 +56,19 @@ class TestPBManager(unittest.TestCase):
         self.connections.append(username)
         return defer.succeed(persp)
 
+    @defer.inlineCallbacks
     def test_repr(self):
-        reg = self.pbm.register('tcp:0:interface=127.0.0.1', "x", "y", self.perspectiveFactory)
+        reg = yield self.pbm.register(
+            'tcp:0:interface=127.0.0.1', "x", "y", self.perspectiveFactory)
         self.assertEqual(repr(self.pbm.dispatchers['tcp:0:interface=127.0.0.1']),
                          '<pbmanager.Dispatcher for x on tcp:0:interface=127.0.0.1>')
-        self.assertEqual(repr(reg), '<pbmanager.Registration for x on tcp:0:interface=127.0.0.1>')
+        self.assertEqual(
+            repr(reg), '<pbmanager.Registration for x on tcp:0:interface=127.0.0.1>')
 
+    @defer.inlineCallbacks
     def test_register_unregister(self):
         portstr = "tcp:0:interface=127.0.0.1"
-        reg = self.pbm.register(portstr, "boris", "pass", self.perspectiveFactory)
+        reg = yield self.pbm.register(portstr, "boris", "pass", self.perspectiveFactory)
 
         # make sure things look right
         self.assertIn(portstr, self.pbm.dispatchers)
@@ -59,27 +79,22 @@ class TestPBManager(unittest.TestCase):
         # dynamically allocated port number which is buried out of reach;
         # however, we can try the requestAvatar and requestAvatarId methods.
 
-        d = disp.requestAvatarId(credentials.UsernamePassword('boris', 'pass'))
+        username = yield disp.requestAvatarId(credentials.UsernamePassword(b'boris', b'pass'))
 
-        def check_avatarid(username):
-            self.assertEqual(username, 'boris')
-        d.addCallback(check_avatarid)
-        d.addCallback(lambda _:
-                      disp.requestAvatar('boris', mock.Mock(), pb.IPerspective))
+        self.assertEqual(username, b'boris')
+        avatar = yield disp.requestAvatar(b'boris', mock.Mock(), pb.IPerspective)
 
-        def check_avatar(xxx_todo_changeme):
-            (iface, persp, detach_fn) = xxx_todo_changeme
-            self.failUnless(persp.is_my_persp)
-            self.assertIn('boris', self.connections)
-        d.addCallback(check_avatar)
+        (iface, persp, detach_fn) = avatar
+        self.assertTrue(persp.is_my_persp)
+        self.assertIn('boris', self.connections)
 
-        d.addCallback(lambda _: reg.unregister())
-        return d
+        yield reg.unregister()
 
+    @defer.inlineCallbacks
     def test_double_register_unregister(self):
         portstr = "tcp:0:interface=127.0.0.1"
-        reg1 = self.pbm.register(portstr, "boris", "pass", None)
-        reg2 = self.pbm.register(portstr, "ivona", "pass", None)
+        reg1 = yield self.pbm.register(portstr, "boris", "pass", None)
+        reg2 = yield self.pbm.register(portstr, "ivona", "pass", None)
 
         # make sure things look right
         self.assertEqual(len(self.pbm.dispatchers), 1)
@@ -88,18 +103,48 @@ class TestPBManager(unittest.TestCase):
         self.assertIn('boris', disp.users)
         self.assertIn('ivona', disp.users)
 
-        d = reg1.unregister()
+        yield reg1.unregister()
 
-        def check_boris_gone(_):
-            self.assertEqual(len(self.pbm.dispatchers), 1)
-            self.assertIn(portstr, self.pbm.dispatchers)
-            disp = self.pbm.dispatchers[portstr]
-            self.assertNotIn('boris', disp.users)
-            self.assertIn('ivona', disp.users)
-        d.addCallback(check_boris_gone)
-        d.addCallback(lambda _: reg2.unregister())
+        self.assertEqual(len(self.pbm.dispatchers), 1)
+        self.assertIn(portstr, self.pbm.dispatchers)
+        disp = self.pbm.dispatchers[portstr]
+        self.assertNotIn('boris', disp.users)
+        self.assertIn('ivona', disp.users)
+        yield reg2.unregister()
 
-        def check_dispatcher_gone(_):
-            self.assertEqual(len(self.pbm.dispatchers), 0)
-        d.addCallback(check_dispatcher_gone)
-        return d
+        self.assertEqual(len(self.pbm.dispatchers), 0)
+
+    @defer.inlineCallbacks
+    def test_requestAvatarId_noinitLock(self):
+        portstr = "tcp:0:interface=127.0.0.1"
+        reg = yield self.pbm.register(portstr, "boris", "pass", self.perspectiveFactory)
+
+        disp = self.pbm.dispatchers[portstr]
+
+        d = disp.requestAvatarId(credentials.UsernamePassword(b'boris', b'pass'))
+        self.assertTrue(d.called,
+            "requestAvatarId should have been called since the lock is free")
+
+        yield reg.unregister()
+
+    @defer.inlineCallbacks
+    def test_requestAvatarId_initLock(self):
+        portstr = "tcp:0:interface=127.0.0.1"
+        reg = yield self.pbm.register(portstr, "boris", "pass", self.perspectiveFactory)
+
+        disp = self.pbm.dispatchers[portstr]
+
+        try:
+            # simulate a reconfig/restart in progress
+            yield self.pbm.master.initLock.acquire()
+            # try to authenticate while the lock is locked
+            d = disp.requestAvatarId(credentials.UsernamePassword(b'boris', b'pass'))
+            self.assertFalse(d.called,
+                "requestAvatarId should block until the lock is released")
+        finally:
+            # release the lock, it should allow for auth to proceed
+            yield self.pbm.master.initLock.release()
+
+        self.assertTrue(d.called,
+            "requestAvatarId should have been called after the lock was released")
+        yield reg.unregister()

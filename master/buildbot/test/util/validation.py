@@ -16,17 +16,18 @@
 # See "Type Validation" in master/docs/developer/tests.rst
 
 import datetime
+import json
 import re
 
 from buildbot.util import UTC
-from buildbot.util import json
+from buildbot.util import bytes2unicode
 
 # Base class
 
 validatorsByName = {}
 
 
-class Validator(object):
+class Validator:
 
     name = None
     hasArgs = False
@@ -51,12 +52,12 @@ class InstanceValidator(Validator):
 
     def validate(self, name, object):
         if not isinstance(object, self.types):
-            yield "%s (%r) is not a %s" % (
+            yield "{} ({!r}) is not a {}".format(
                 name, object, self.name or repr(self.types))
 
 
 class IntValidator(InstanceValidator):
-    types = (int, long)
+    types = (int,)
     name = 'integer'
 
 
@@ -67,13 +68,18 @@ class BooleanValidator(InstanceValidator):
 
 class StringValidator(InstanceValidator):
     # strings must be unicode
-    types = (unicode,)
+    types = (str,)
     name = 'string'
 
 
 class BinaryValidator(InstanceValidator):
-    types = (str,)
+    types = (bytes,)
     name = 'bytestring'
+
+
+class StrValidator(InstanceValidator):
+    types = (str,)
+    name = 'str'
 
 
 class DateTimeValidator(Validator):
@@ -82,36 +88,36 @@ class DateTimeValidator(Validator):
 
     def validate(self, name, object):
         if not isinstance(object, datetime.datetime):
-            yield "%s - %r - is not a datetime" % (name, object)
+            yield "{} - {!r} - is not a datetime".format(name, object)
         elif object.tzinfo != UTC:
-            yield "%s is not a UTC datetime" % (name,)
+            yield "{} is not a UTC datetime".format(name)
 
 
 class IdentifierValidator(Validator):
-    types = (unicode,)
+    types = (str,)
     name = 'identifier'
     hasArgs = True
 
-    ident_re = re.compile('^[a-zA-Z_-][a-zA-Z0-9_-]*$')
+    ident_re = re.compile('^[a-zA-Z\u00a0-\U0010ffff_-][a-zA-Z0-9\u00a0-\U0010ffff_-]*$', flags=re.UNICODE)
 
     def __init__(self, len):
         self.len = len
 
     def validate(self, name, object):
-        if not isinstance(object, unicode):
-            yield "%s - %r - is not a unicode string" % (name, object)
+        if not isinstance(object, str):
+            yield "{} - {!r} - is not a unicode string".format(name, object)
         elif not self.ident_re.match(object):
-            yield "%s - %r - is not an identifier" % (name, object)
-        elif len(object) < 1:
-            yield "%s - identifiers cannot be an empty string" % (name,)
+            yield "{} - {!r} - is not an identifier".format(name, object)
+        elif not object:
+            yield "{} - identifiers cannot be an empty string".format(name)
         elif len(object) > self.len:
-            yield "%s - %r - is longer than %d characters" % (name, object,
-                                                              self.len)
+            yield "{} - {!r} - is longer than {} characters".format(
+                name, object, self.len)
 
 # Miscellaneous
 
 
-class NoneOk(object):
+class NoneOk:
 
     def __init__(self, original):
         self.original = original
@@ -124,7 +130,7 @@ class NoneOk(object):
                 yield msg
 
 
-class Any(object):
+class Any:
 
     def validate(self, name, object):
         return
@@ -136,7 +142,9 @@ class DictValidator(Validator):
 
     name = 'dict'
 
-    def __init__(self, optionalNames=[], **keys):
+    def __init__(self, optionalNames=None, **keys):
+        if optionalNames is None:
+            optionalNames = []
         self.optionalNames = set(optionalNames)
         self.keys = keys
         self.expectedNames = set(keys.keys())
@@ -144,24 +152,24 @@ class DictValidator(Validator):
     def validate(self, name, object):
         # this uses isinstance, allowing dict subclasses as used by the DB API
         if not isinstance(object, dict):
-            yield "%s (%r) is not a dictionary (got type %s)" \
-                % (name, object, type(object))
+            yield "{} ({!r}) is not a dictionary (got type {})".format(
+                name, object, type(object))
             return
 
         gotNames = set(object.keys())
 
         unexpected = gotNames - self.expectedNames
         if unexpected:
-            yield "%s has unexpected keys %s" % (name,
+            yield "{} has unexpected keys {}".format(name,
                                                  ", ".join([repr(n) for n in unexpected]))
 
         missing = self.expectedNames - self.optionalNames - gotNames
         if missing:
-            yield "%s is missing keys %s" % (name,
+            yield "{} is missing keys {}".format(name,
                                              ", ".join([repr(n) for n in missing]))
 
         for k in gotNames & self.expectedNames:
-            for msg in self.keys[k].validate("%s[%r]" % (name, k), object[k]):
+            for msg in self.keys[k].validate("{}[{!r}]".format(name, k), object[k]):
                 yield msg
 
 
@@ -173,11 +181,11 @@ class SequenceValidator(Validator):
 
     def validate(self, name, object):
         if not isinstance(object, self.type):
-            yield "%s (%r) is not a %s" % (name, object, self.name)
+            yield "{} ({!r}) is not a {}".format(name, object, self.name)
             return
 
         for idx, elt in enumerate(object):
-            for msg in self.elementValidator.validate("%s[%d]" % (name, idx),
+            for msg in self.elementValidator.validate("{}[{}]".format(name, idx),
                                                       elt):
                 yield msg
 
@@ -196,7 +204,7 @@ class StringListValidator(ListValidator):
     name = 'string-list'
 
     def __init__(self):
-        ListValidator.__init__(self, StringValidator())
+        super().__init__(StringValidator())
 
 
 class SourcedPropertiesValidator(Validator):
@@ -205,21 +213,21 @@ class SourcedPropertiesValidator(Validator):
 
     def validate(self, name, object):
         if not isinstance(object, dict):
-            yield "%s is not sourced properties (not a dict)" % (name,)
+            yield "{} is not sourced properties (not a dict)".format(name)
             return
-        for k, v in object.iteritems():
-            if not isinstance(k, unicode):
-                yield "%s property name %r is not unicode" % (name, k)
+        for k, v in object.items():
+            if not isinstance(k, str):
+                yield "{} property name {!r} is not unicode".format(name, k)
             if not isinstance(v, tuple) or len(v) != 2:
-                yield "%s property value for '%s' is not a 2-tuple" % (name, k)
+                yield "{} property value for '{}' is not a 2-tuple".format(name, k)
                 return
             propval, propsrc = v
-            if not isinstance(propsrc, unicode):
-                yield "%s[%s] source %r is not unicode" % (name, k, propsrc)
+            if not isinstance(propsrc, str):
+                yield "{}[{}] source {!r} is not unicode".format(name, k, propsrc)
             try:
                 json.dumps(propval)
             except (TypeError, ValueError):
-                yield "%s[%r] value is not JSON-able" % (name, k)
+                yield "{}[{!r}] value is not JSON-able".format(name, k)
 
 
 class JsonValidator(Validator):
@@ -230,7 +238,7 @@ class JsonValidator(Validator):
         try:
             json.dumps(object)
         except (TypeError, ValueError):
-            yield "%s[%r] value is not JSON-able" % (name, object)
+            yield "{}[{!r}] value is not JSON-able".format(name, object)
 
 
 class PatchValidator(Validator):
@@ -252,17 +260,17 @@ class PatchValidator(Validator):
 
 class MessageValidator(Validator):
 
-    routingKeyValidator = TupleValidator(BinaryValidator())
+    routingKeyValidator = TupleValidator(StrValidator())
 
     def __init__(self, events, messageValidator):
-        self.events = set(events)
+        self.events = [bytes2unicode(e) for e in set(events)]
         self.messageValidator = messageValidator
 
     def validate(self, name, routingKey_message):
         try:
             routingKey, message = routingKey_message
-        except (TypeError, ValueError), e:
-            yield "%r: not a routing key and message: %s" % (routingKey_message, e)
+        except (TypeError, ValueError) as e:
+            yield "{!r}: not a routing key and message: {}".format(routingKey_message, e)
         routingKeyBad = False
         for msg in self.routingKeyValidator.validate("routingKey", routingKey):
             yield msg
@@ -271,9 +279,9 @@ class MessageValidator(Validator):
         if not routingKeyBad:
             event = routingKey[-1]
             if event not in self.events:
-                yield "routing key event %r is not valid" % (event,)
+                yield "routing key event {!r} is not valid".format(event)
 
-        for msg in self.messageValidator.validate("%s message" % routingKey[0],
+        for msg in self.messageValidator.validate("{} message".format(routingKey[0]),
                                                   message):
             yield msg
 
@@ -289,14 +297,15 @@ class Selector(Validator):
     def validate(self, name, arg_object):
         try:
             arg, object = arg_object
-        except (TypeError, ValueError), e:
-            yield "%r: not a not data options and data dict: %s" % (arg_object, e)
+        except (TypeError, ValueError) as e:
+            yield "{!r}: not a not data options and data dict: {}".format(arg_object, e)
         for selector, validator in self.selectors:
             if selector is None or selector(arg):
                 for msg in validator.validate(name, object):
                     yield msg
                 return
-        yield "no match for selector argument %r" % (arg,)
+        yield "no match for selector argument {!r}".format(arg)
+
 
 # Type definitions
 
@@ -310,7 +319,7 @@ dbdict = {}
 message['masters'] = Selector()
 message['masters'].add(None,
                        MessageValidator(
-                           events=['started', 'stopped'],
+                           events=[b'started', b'stopped'],
                            messageValidator=DictValidator(
                                masterid=IntValidator(),
                                name=StringValidator(),
@@ -370,7 +379,7 @@ dbdict['ssdict'] = DictValidator(
 message['builders'] = Selector()
 message['builders'].add(None,
                         MessageValidator(
-                            events=['started', 'stopped'],
+                            events=[b'started', b'stopped'],
                             messageValidator=DictValidator(
                                 builderid=IntValidator(),
                                 masterid=IntValidator(),
@@ -385,9 +394,9 @@ dbdict['builderdict'] = DictValidator(
     tags=ListValidator(StringValidator()),
 )
 
-# slave
+# worker
 
-dbdict['buildslavedict'] = DictValidator(
+dbdict['workerdict'] = DictValidator(
     id=IntValidator(),
     name=StringValidator(),
     configured_on=ListValidator(
@@ -396,8 +405,10 @@ dbdict['buildslavedict'] = DictValidator(
             builderid=IntValidator(),
         )
     ),
+    paused=BooleanValidator(),
+    graceful=BooleanValidator(),
     connected_to=ListValidator(IntValidator()),
-    slaveinfo=JsonValidator(),
+    workerinfo=JsonValidator(),
 )
 
 # buildset
@@ -413,7 +424,7 @@ _buildset = dict(
     parent_buildid=NoneOk(IntValidator()),
     parent_relationship=NoneOk(StringValidator()),
 )
-_buildsetEvents = ['new', 'complete']
+_buildsetEvents = [b'new', b'complete']
 
 message['buildsets'] = Selector()
 message['buildsets'].add(lambda k: k[-1] == 'new',
@@ -456,7 +467,7 @@ dbdict['bsdict'] = DictValidator(
 message['buildrequests'] = Selector()
 message['buildrequests'].add(None,
                              MessageValidator(
-                                 events=['new', 'claimed', 'unclaimed'],
+                                 events=[b'new', b'claimed', b'unclaimed'],
                                  messageValidator=DictValidator(
                                      # TODO: probably wrong!
                                      brid=IntValidator(),
@@ -470,11 +481,12 @@ message['buildrequests'].add(None,
 message['changes'] = Selector()
 message['changes'].add(None,
                        MessageValidator(
-                           events=['new'],
+                           events=[b'new'],
                            messageValidator=DictValidator(
                                changeid=IntValidator(),
                                parent_changeids=ListValidator(IntValidator()),
                                author=StringValidator(),
+                               committer=StringValidator(),
                                files=ListValidator(StringValidator()),
                                comments=StringValidator(),
                                revision=NoneOk(StringValidator()),
@@ -494,6 +506,7 @@ message['changes'].add(None,
 dbdict['chdict'] = DictValidator(
     changeid=IntValidator(),
     author=StringValidator(),
+    committer=StringValidator(),
     files=ListValidator(StringValidator()),
     comments=StringValidator(),
     revision=NoneOk(StringValidator()),
@@ -523,6 +536,7 @@ dbdict['schedulerdict'] = DictValidator(
     id=IntValidator(),
     name=StringValidator(),
     masterid=NoneOk(IntValidator()),
+    enabled=BooleanValidator(),
 )
 
 # builds
@@ -532,7 +546,7 @@ _build = dict(
     number=IntValidator(),
     builderid=IntValidator(),
     buildrequestid=IntValidator(),
-    buildslaveid=IntValidator(),
+    workerid=IntValidator(),
     masterid=IntValidator(),
     started_at=IntValidator(),
     complete=BooleanValidator(),
@@ -540,7 +554,7 @@ _build = dict(
     state_string=StringValidator(),
     results=NoneOk(IntValidator()),
 )
-_buildEvents = ['new', 'complete']
+_buildEvents = [b'new', b'complete']
 
 message['builds'] = Selector()
 message['builds'].add(None,
@@ -550,18 +564,25 @@ message['builds'].add(None,
                               **_build
                           )))
 
-dbdict['builddict'] = DictValidator(
+# As build's properties are fetched at DATA API level,
+# a distinction shall be made as both are not equal.
+# Validates DB layer
+dbdict['dbbuilddict'] = buildbase = DictValidator(
     id=IntValidator(),
     number=IntValidator(),
     builderid=IntValidator(),
     buildrequestid=IntValidator(),
-    buildslaveid=IntValidator(),
+    workerid=IntValidator(),
     masterid=IntValidator(),
     started_at=DateTimeValidator(),
     complete_at=NoneOk(DateTimeValidator()),
     state_string=StringValidator(),
     results=NoneOk(IntValidator()),
 )
+
+# Validates DATA API layer
+dbdict['builddict'] = DictValidator(
+    properties=NoneOk(SourcedPropertiesValidator()), **buildbase.keys)
 
 # steps
 
@@ -578,7 +599,7 @@ _step = dict(
     urls=ListValidator(StringValidator()),
     hidden=BooleanValidator(),
 )
-_stepEvents = ['new', 'complete']
+_stepEvents = [b'new', b'complete']
 
 message['steps'] = Selector()
 message['steps'].add(None,
@@ -642,7 +663,7 @@ def verifyMessage(testcase, routingKey, message_):
     # the "type" of the message is identified by last path name
     # -1 being the event, and -2 the id.
 
-    validator = message[routingKey[-3]]
+    validator = message[bytes2unicode(routingKey[-3])]
     _verify(testcase, validator, '',
             (routingKey, (routingKey, message_)))
 

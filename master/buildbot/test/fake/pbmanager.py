@@ -13,14 +13,16 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.util import service
+
 from twisted.internet import defer
+
+from buildbot.util import service
 
 
 class FakePBManager(service.AsyncMultiService):
 
     def __init__(self):
-        service.AsyncMultiService.__init__(self)
+        super().__init__()
         self.setName("fake-pbmanager")
         self._registrations = []
         self._unregistrations = []
@@ -29,7 +31,7 @@ class FakePBManager(service.AsyncMultiService):
         if (portstr, username) not in self._registrations:
             reg = FakeRegistration(self, portstr, username)
             self._registrations.append((portstr, username, password))
-            return reg
+            return defer.succeed(reg)
         else:
             raise KeyError("username '%s' is already registered on port %s"
                            % (username, portstr))
@@ -39,7 +41,7 @@ class FakePBManager(service.AsyncMultiService):
         return defer.succeed(None)
 
 
-class FakeRegistration(object):
+class FakeRegistration:
 
     def __init__(self, pbmanager, portstr, username):
         self._portstr = portstr

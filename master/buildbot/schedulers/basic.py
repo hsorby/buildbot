@@ -13,6 +13,12 @@
 #
 # Copyright Buildbot Team Members
 
+from collections import defaultdict
+
+from twisted.internet import defer
+from twisted.internet import reactor
+from twisted.python import log
+
 from buildbot import config
 from buildbot import util
 from buildbot.changes import changes
@@ -21,10 +27,6 @@ from buildbot.schedulers import base
 from buildbot.schedulers import dependent
 from buildbot.util import NotABranch
 from buildbot.util.codebase import AbsoluteSourceStampsMixin
-from collections import defaultdict
-from twisted.internet import defer
-from twisted.internet import reactor
-from twisted.python import log
 
 
 class BaseBasicScheduler(base.BaseScheduler):
@@ -36,8 +38,8 @@ class BaseBasicScheduler(base.BaseScheduler):
 
     """
 
-    compare_attrs = ['treeStableTimer', 'change_filter', 'fileIsImportant',
-                     'onlyImportant', 'reason']
+    compare_attrs = ('treeStableTimer', 'change_filter', 'fileIsImportant',
+                     'onlyImportant', 'reason')
 
     _reactor = reactor  # for tests
 
@@ -49,7 +51,7 @@ class BaseBasicScheduler(base.BaseScheduler):
 
     def __init__(self, name, shouldntBeSet=NotSet, treeStableTimer=None,
                  builderNames=None, branch=NotABranch, branches=NotABranch,
-                 fileIsImportant=None, properties={}, categories=None,
+                 fileIsImportant=None, categories=None,
                  reason="The %(classname)s scheduler named '%(name)s' triggered this build",
                  change_filter=None, onlyImportant=False, **kwargs):
         if shouldntBeSet is not self.NotSet:
@@ -60,7 +62,7 @@ class BaseBasicScheduler(base.BaseScheduler):
                 "fileIsImportant must be a callable")
 
         # initialize parent classes
-        base.BaseScheduler.__init__(self, name, builderNames, properties, **kwargs)
+        super().__init__(name, builderNames, **kwargs)
 
         self.treeStableTimer = treeStableTimer
         if fileIsImportant is not None:
@@ -75,7 +77,7 @@ class BaseBasicScheduler(base.BaseScheduler):
         self._stable_timers = defaultdict(lambda: None)
         self._stable_timers_lock = defer.DeferredLock()
 
-        self.reason = util.ascii2unicode(reason % {
+        self.reason = util.bytes2unicode(reason % {
             'name': name, 'classname': self.__class__.__name__
         })
 
@@ -84,7 +86,11 @@ class BaseBasicScheduler(base.BaseScheduler):
 
     @defer.inlineCallbacks
     def activate(self):
-        yield base.BaseScheduler.activate(self)
+        yield super().activate()
+
+        if not self.enabled:
+            return
+
         yield self.startConsumingChanges(fileIsImportant=self.fileIsImportant,
                                          change_filter=self.change_filter,
                                          onlyImportant=self.onlyImportant)
@@ -98,13 +104,15 @@ class BaseBasicScheduler(base.BaseScheduler):
         # changes, so get rid of any hanging around from previous
         # configurations
         else:
-            yield self.master.db.schedulers.flushChangeClassifications(
-                self.objectid)
+            yield self.master.db.schedulers.flushChangeClassifications(self.serviceid)
 
     @defer.inlineCallbacks
     def deactivate(self):
         # the base deactivate will unsubscribe from new changes
-        yield base.BaseScheduler.deactivate(self)
+        yield super().deactivate()
+
+        if not self.enabled:
+            return
 
         @util.deferredLocked(self._stable_timers_lock)
         def cancel_timers():
@@ -143,7 +151,7 @@ class BaseBasicScheduler(base.BaseScheduler):
 
         # record the change's importance
         return self.master.db.schedulers.classifyChanges(
-            self.objectid, {change.number: important})
+            self.serviceid, {change.number: important})
 
     @defer.inlineCallbacks
     def scanExistingClassifiedChanges(self):
@@ -154,11 +162,10 @@ class BaseBasicScheduler(base.BaseScheduler):
         # NOTE: this may double-call gotChange for changes that arrive just as
         # the scheduler starts up.  In practice, this doesn't hurt anything.
         classifications = \
-            yield self.master.db.schedulers.getChangeClassifications(
-                self.objectid)
+            yield self.master.db.schedulers.getChangeClassifications(self.serviceid)
 
         # call gotChange for each change, after first fetching it from the db
-        for changeid, important in classifications.iteritems():
+        for changeid, important in classifications.items():
             chdict = yield self.master.db.changes.getChange(changeid)
 
             if not chdict:
@@ -170,7 +177,7 @@ class BaseBasicScheduler(base.BaseScheduler):
     def getTimerNameForChange(self, change):
         raise NotImplementedError  # see subclasses
 
-    def getChangeClassificationsForTimer(self, objectid, timer_name):
+    def getChangeClassificationsForTimer(self, sched_id, timer_name):
         """similar to db.schedulers.getChangeClassifications, but given timer
         name"""
         raise NotImplementedError  # see subclasses
@@ -184,8 +191,7 @@ class BaseBasicScheduler(base.BaseScheduler):
             return
 
         classifications = \
-            yield self.getChangeClassificationsForTimer(self.objectid,
-                                                        timer_name)
+            yield self.getChangeClassificationsForTimer(self.serviceid, timer_name)
 
         # just in case: databases do weird things sometimes!
         if not classifications:  # pragma: no cover
@@ -197,32 +203,26 @@ class BaseBasicScheduler(base.BaseScheduler):
 
         max_changeid = changeids[-1]  # (changeids are sorted)
         yield self.master.db.schedulers.flushChangeClassifications(
-            self.objectid, less_than=max_changeid + 1)
-
-    def getPendingBuildTimes(self):
-        # This isn't locked, since the caller expects an immediate value,
-        # and in any case, this is only an estimate.
-        return [timer.getTime() for timer in self._stable_timers.values() if timer and timer.active()]
+            self.serviceid, less_than=max_changeid + 1)
 
 
-class SingleBranchScheduler(BaseBasicScheduler, AbsoluteSourceStampsMixin):
+class SingleBranchScheduler(AbsoluteSourceStampsMixin, BaseBasicScheduler):
 
     def __init__(self, name, createAbsoluteSourceStamps=False, **kwargs):
         self.createAbsoluteSourceStamps = createAbsoluteSourceStamps
-        BaseBasicScheduler.__init__(self, name, **kwargs)
+        super().__init__(name, **kwargs)
 
     @defer.inlineCallbacks
     def gotChange(self, change, important):
         if self.createAbsoluteSourceStamps:
             yield self.recordChange(change)
 
-        yield BaseBasicScheduler.gotChange(self, change, important)
+        yield super().gotChange(change, important)
 
     def getCodebaseDict(self, codebase):
         if self.createAbsoluteSourceStamps:
-            return AbsoluteSourceStampsMixin.getCodebaseDict(self, codebase)
-        else:
-            return self.codebases[codebase]
+            return super().getCodebaseDict(codebase)
+        return self.codebases[codebase]
 
     def getChangeFilter(self, branch, branches, change_filter, categories):
         if branch is NotABranch and not change_filter:
@@ -241,9 +241,8 @@ class SingleBranchScheduler(BaseBasicScheduler, AbsoluteSourceStampsMixin):
     def getTimerNameForChange(self, change):
         return "only"  # this class only uses one timer
 
-    def getChangeClassificationsForTimer(self, objectid, timer_name):
-        return self.master.db.schedulers.getChangeClassifications(
-            self.objectid)
+    def getChangeClassificationsForTimer(self, sched_id, timer_name):
+        return self.master.db.schedulers.getChangeClassifications(sched_id)
 
 
 class Scheduler(SingleBranchScheduler):
@@ -255,7 +254,7 @@ class Scheduler(SingleBranchScheduler):
                 "buildbot.schedulers.basic.SingleBranchScheduler instead " +
                 "(note that this may require you to change your import " +
                 "statement)")
-        SingleBranchScheduler.__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
 
 
 class AnyBranchScheduler(BaseBasicScheduler):
@@ -270,11 +269,13 @@ class AnyBranchScheduler(BaseBasicScheduler):
         # Py2.6+: could be a namedtuple
         return (change.codebase, change.project, change.repository, change.branch)
 
-    def getChangeClassificationsForTimer(self, objectid, timer_name):
-        codebase, project, repository, branch = timer_name  # set in getTimerNameForChange
+    def getChangeClassificationsForTimer(self, sched_id, timer_name):
+        # set in getTimerNameForChange
+        codebase, project, repository, branch = timer_name
         return self.master.db.schedulers.getChangeClassifications(
-            self.objectid, branch=branch, repository=repository,
+            sched_id, branch=branch, repository=repository,
             codebase=codebase, project=project)
+
 
 # now at buildbot.schedulers.dependent, but keep the old name alive
 Dependent = dependent.Dependent

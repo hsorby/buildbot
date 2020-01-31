@@ -13,8 +13,9 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.test.util import interfaces
 from twisted.trial import unittest
+
+from buildbot.test.util import interfaces
 
 
 class TestAssertArgSpecMatches(interfaces.InterfaceTests, unittest.TestCase):
@@ -31,13 +32,14 @@ class TestAssertArgSpecMatches(interfaces.InterfaceTests, unittest.TestCase):
             @self.assertArgSpecMatches(myfunc)
             def myfunc3(x, y=3, *args):
                 pass
-        except Exception, e:
+        except Exception as e:
             error = e
         else:
             error = None
 
         self.assertIdentical(type(error), unittest.FailTest)
-        self.assertEqual(error.args, ('Expected: (x, y=3, *args); got: (x, y=2, *args)',))
+        self.assertEqual(
+            error.args, ('Expected: (x, y=3, *args); got: (x, y=2, *args)',))
 
     def test_double_decorator(self):
         def myfunc(x, y):
@@ -57,7 +59,7 @@ class TestAssertArgSpecMatches(interfaces.InterfaceTests, unittest.TestCase):
             @self.assertArgSpecMatches(myfunc, myfunc3)
             def myfunc5(x, y):
                 pass
-        except Exception, e:
+        except Exception as e:
             error = e
         else:
             error = None
@@ -69,7 +71,7 @@ class TestAssertArgSpecMatches(interfaces.InterfaceTests, unittest.TestCase):
             @self.assertArgSpecMatches(myfunc, myfunc3)
             def myfunc6(xx, yy):
                 pass
-        except Exception, e:
+        except Exception as e:
             error = e
         else:
             error = None
@@ -91,10 +93,11 @@ class TestAssertArgSpecMatches(interfaces.InterfaceTests, unittest.TestCase):
 
         try:
             self.assertArgSpecMatches(myfunc, myfunc3)
-        except Exception, e:
+        except Exception as e:
             error = e
         else:
             error = None
 
         self.assertIdentical(type(error), unittest.FailTest)
-        self.assertEqual(error.args, ('Expected: (x, y=2, *args); got: (x, y=3, *args)',))
+        self.assertEqual(
+            error.args, ('Expected: (x, y=2, *args); got: (x, y=3, *args)',))

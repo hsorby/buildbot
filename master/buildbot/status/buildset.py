@@ -13,15 +13,17 @@
 #
 # Copyright Buildbot Team Members
 
+
+from twisted.internet import defer
+from zope.interface import implementer
+
 from buildbot import interfaces
 from buildbot.data import resultspec
 from buildbot.status.buildrequest import BuildRequestStatus
-from twisted.internet import defer
-from zope.interface import implements
 
 
+@implementer(interfaces.IBuildSetStatus)
 class BuildSetStatus:
-    implements(interfaces.IBuildSetStatus)
 
     def __init__(self, bsdict, status):
         self.id = bsdict['bsid']
@@ -49,21 +51,21 @@ class BuildSetStatus:
         d = self.master.data.get(('buildrequests', ),
                                  filters=[resultspec.Filter('buildsetid', 'eq', [self.id])])
 
+        @d.addCallback
         def get_objects(brdicts):
-            return dict([
-                (brd['buildername'], BuildRequestStatus(brd['buildername'],
-                                                        brd['brid'], self.status))
-                for brd in brdicts])
-        d.addCallback(get_objects)
+            return {
+                brd['buildername']: BuildRequestStatus(brd['buildername'],
+                                                       brd['brid'], self.status)
+                for brd in brdicts}
         return d
 
     def getBuilderNames(self):
         d = self.master.data.get(('buildrequests', ),
                                  filters=[resultspec.Filter('buildsetid', 'eq', [self.id])])
 
+        @d.addCallback
         def get_names(brdicts):
             return sorted([brd['buildername'] for brd in brdicts])
-        d.addCallback(get_names)
         return d
 
     def waitUntilFinished(self):

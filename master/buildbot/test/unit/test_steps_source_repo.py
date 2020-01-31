@@ -13,16 +13,19 @@
 #
 # Copyright Buildbot Team Members
 
-from .test_changes_gerritchangesource import TestGerritChangeSource
+from twisted.trial import unittest
+
 from buildbot.changes.changes import Change
 from buildbot.process.properties import Properties
-from buildbot.status.results import FAILURE
-from buildbot.status.results import SUCCESS
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
 from buildbot.steps.source import repo
 from buildbot.test.fake.remotecommand import Expect
 from buildbot.test.fake.remotecommand import ExpectShell
 from buildbot.test.util import sourcesteps
-from twisted.trial import unittest
+from buildbot.test.util.misc import TestReactorMixin
+
+from .test_changes_gerritchangesource import TestGerritChangeSource
 
 
 class RepoURL(unittest.TestCase):
@@ -31,8 +34,8 @@ class RepoURL(unittest.TestCase):
     def oneTest(self, props, expected):
         p = Properties()
         p.update(props, "test")
-        r = repo.RepoDownloadsFromProperties(props.keys())
-        self.assertEqual(r.getRenderingFor(p), expected)
+        r = repo.RepoDownloadsFromProperties(list(props))
+        self.assertEqual(sorted(r.getRenderingFor(p)), sorted(expected))
 
     def test_parse1(self):
         self.oneTest(
@@ -53,9 +56,11 @@ class RepoURL(unittest.TestCase):
             {'a': "repo download test/bla 564/12"}, ["test/bla 564/12"])
 
 
-class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
+class TestRepo(sourcesteps.SourceStepMixin, TestReactorMixin,
+               unittest.TestCase):
 
     def setUp(self):
+        self.setUpTestReactor()
         self.shouldRetry = False
         self.logEnviron = True
         return self.setUpSourceStep()
@@ -113,7 +118,11 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
         )
 
     def expectRepoSync(self, which_fail=-1, breakatfail=False, depth=0,
-                       syncoptions=["-c"], override_commands=[]):
+                       syncoptions=None, override_commands=None):
+        if syncoptions is None:
+            syncoptions = ["-c"]
+        if override_commands is None:
+            override_commands = []
         commands = [
             self.ExpectShell(
                 command=[
@@ -122,12 +131,12 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
                 command=['repo', 'init', '-u', 'git://myrepo.com/manifest.git',
                          '-b', 'mb', '-m', 'mf', '--depth', str(depth)])
         ] + override_commands + [
-            self.ExpectShell(command=['repo', 'sync'] + syncoptions),
+            self.ExpectShell(command=['repo', 'sync', '--force-sync'] + syncoptions),
             self.ExpectShell(
                 command=['repo', 'manifest', '-r', '-o', 'manifest-original.xml'])
         ]
-        for i in xrange(len(commands)):
-            self.expectCommands(commands[i] + (which_fail == i and 1 or 0))
+        for i, command in enumerate(commands):
+            self.expectCommands(command + (which_fail == i and 1 or 0))
             if which_fail == i and breakatfail:
                 break
 
@@ -279,6 +288,9 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_update_tarball_tgz(self):
         self.do_test_update_tarball("tgz", ["-z"])
 
+    def test_update_tarball_pigz(self):
+        self.do_test_update_tarball("pigz", ["-I", "pigz"])
+
     def test_update_tarball_bzip(self):
         self.do_test_update_tarball("tar.bz2", ["-j"])
 
@@ -288,9 +300,11 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_update_tarball_lzop(self):
         self.do_test_update_tarball("tar.lzop", ["--lzop"])
 
-    def test_update_tarball_fail1(self, suffix="tar", option=[]):
+    def test_update_tarball_fail1(self, suffix="tar", option=None):
         """tarball extract fail -> remove the tarball + remove .repo dir
         """
+        if option is None:
+            option = []
         self.mySetupStep(tarball="/tarball." + suffix)
         self.expectClobber()
         self.expectCommands(
@@ -316,9 +330,11 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
                             + 0)
         return self.myRunStep()
 
-    def test_update_tarball_fail2(self, suffix="tar", option=[]):
+    def test_update_tarball_fail2(self, suffix="tar", option=None):
         """tarball update fail -> remove the tarball + continue repo download
         """
+        if option is None:
+            option = []
         self.mySetupStep(tarball="/tarball." + suffix)
         self.build.setProperty("repo_download",
                                "repo download test/bla 564/12", "test")
@@ -405,7 +421,7 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
                 workdir='wkdir/.repo/manifests',
                 command=['git', 'cherry-pick', 'FETCH_HEAD'])
             + 0,
-            self.ExpectShell(command=['repo', 'sync', '-c'])
+            self.ExpectShell(command=['repo', 'sync', '--force-sync', '-c'])
             + 0,
             self.ExpectShell(
                 command=['repo', 'manifest', '-r', '-o', 'manifest-original.xml'])
@@ -419,7 +435,8 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_repo_downloads_mirror_sync(self):
         """repo downloads, with mirror synchronization issues"""
         self.mySetupStep()
-        self.step.mirror_sync_sleep = 0.001  # we dont really want the test to wait...
+        # we don't really want the test to wait...
+        self.step.mirror_sync_sleep = 0.001
         self.build.setProperty("repo_download",
                                "repo download test/bla 564/12", "test")
         self.expectnoClobber()
@@ -443,7 +460,8 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
     def test_repo_downloads_change_missing(self):
         """repo downloads, with no actual mirror synchronization issues (still retries 2 times)"""
         self.mySetupStep()
-        self.step.mirror_sync_sleep = 0.001  # we dont really want the test to wait...
+        # we don't really want the test to wait...
+        self.step.mirror_sync_sleep = 0.001
         self.step.mirror_sync_retry = 1  # on retry once
         self.build.setProperty("repo_download",
                                "repo download test/bla 564/12", "test")
@@ -521,7 +539,8 @@ class TestRepo(sourcesteps.SourceStepMixin, unittest.TestCase):
 
     def test_repo_downloads_from_change_source_codebase(self):
         """basic repo download from change source, and check that repo_downloaded is updated"""
-        self.mySetupStep(repoDownloads=repo.RepoDownloadsFromChangeSource("mycodebase"))
+        self.mySetupStep(
+            repoDownloads=repo.RepoDownloadsFromChangeSource("mycodebase"))
         chdict = TestGerritChangeSource.expected_change
         change = Change(None, None, None, properties=chdict['properties'])
         # getSourceStamp is faked by SourceStepMixin

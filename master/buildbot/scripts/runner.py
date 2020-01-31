@@ -12,25 +12,29 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
-
-from __future__ import with_statement
-
+#
 # N.B.: don't import anything that might pull in a reactor yet. Some of our
 # subcommands want to load modules that need the gtk reactor.
 #
 # Also don't forget to mirror your changes on command-line options in manual
-# pages and texinfo documentation.
+# pages and reStructuredText documentation.
+
+import getpass
+import sys
+import textwrap
 
 import sqlalchemy as sa
-import sys
 
-from buildbot.scripts import base
 from twisted.python import reflect
 from twisted.python import usage
 
+import buildbot
+from buildbot.scripts import base
+from buildbot.util import check_functional_environment
 
 # Note that the terms 'options' and 'config' are used interchangeably here - in
 # fact, they are interchanged several times.  Caveat legator.
+
 
 def validateMasterOption(master):
     """
@@ -65,7 +69,7 @@ class UpgradeMasterOptions(base.BasedirMixin, base.SubcommandOptions):
     def getSynopsis(self):
         return "Usage:    buildbot upgrade-master [options] [<basedir>]"
 
-    longdesc = """
+    longdesc = textwrap.dedent("""
     This command takes an existing buildmaster working directory and
     adds/modifies the files there to work with the current version of
     buildbot. When this command is finished, the buildmaster directory should
@@ -80,15 +84,10 @@ class UpgradeMasterOptions(base.BasedirMixin, base.SubcommandOptions):
     will create index.html.new). You can then look at the new version and
     decide how to merge its contents into your modified file.
 
-    When upgrading from a pre-0.8.0 release (which did not use a database),
-    this command will create the given database and migrate data from the old
-    pickle files into it, then move the pickle files out of the way (e.g. to
-    changes.pck.old).
-
     When upgrading the database, this command uses the database specified in
     the master configuration file.  If you wish to use a database other than
     the default (sqlite), be sure to set that parameter before upgrading.
-    """
+    """)
 
 
 class CreateMasterOptions(base.BasedirMixin, base.SubcommandOptions):
@@ -117,10 +116,11 @@ class CreateMasterOptions(base.BasedirMixin, base.SubcommandOptions):
     def getSynopsis(self):
         return "Usage:    buildbot create-master [options] [<basedir>]"
 
-    longdesc = """
+    longdesc = textwrap.dedent("""
     This command creates a buildmaster working directory and buildbot.tac file.
-    The master will live in <dir> and create various files there.  If
-    --relocatable is given, then the resulting buildbot.tac file will be
+    The master will live in <basedir> (defaults to the current directory)
+    and create various files there.
+    If --relocatable is given, then the resulting buildbot.tac file will be
     written such that its containing directory is assumed to be the basedir.
     This is generally a good idea.
 
@@ -144,10 +144,10 @@ class CreateMasterOptions(base.BasedirMixin, base.SubcommandOptions):
     The --db string is stored verbatim in the buildbot.tac file, and
     evaluated at 'buildbot start' time to pass a DBConnector instance into
     the newly-created BuildMaster object.
-    """
+    """)
 
     def postOptions(self):
-        base.BasedirMixin.postOptions(self)
+        super().postOptions()
 
         # validate 'log-count' parameter
         if self['log-count'] == 'None':
@@ -173,6 +173,7 @@ class StopOptions(base.BasedirMixin, base.SubcommandOptions):
     optFlags = [
         ["quiet", "q", "Do not emit the commands being run"],
         ["clean", "c", "Clean shutdown master"],
+        ["no-wait", None, "Don't wait for complete master shutdown"],
     ]
 
     def getSynopsis(self):
@@ -186,6 +187,11 @@ class RestartOptions(base.BasedirMixin, base.SubcommandOptions):
         ['nodaemon', None, "Don't daemonize (stay in foreground)"],
         ["clean", "c", "Clean shutdown master"],
     ]
+    optParameters = [
+        ['start_timeout', None, None,
+         'The amount of time the script waits for the master to restart until '
+         'it declares the operation as failure'],
+    ]
 
     def getSynopsis(self):
         return "Usage:    buildbot restart [<basedir>]"
@@ -196,6 +202,11 @@ class StartOptions(base.BasedirMixin, base.SubcommandOptions):
     optFlags = [
         ['quiet', 'q', "Don't display startup log messages"],
         ['nodaemon', None, "Don't daemonize (stay in foreground)"],
+    ]
+    optParameters = [
+        ['start_timeout', None, None,
+         'The amount of time the script waits for the master to start until it '
+         'declares the operation as failure'],
     ]
 
     def getSynopsis(self):
@@ -216,7 +227,7 @@ class SendChangeOptions(base.SubcommandOptions):
     subcommandFunction = "buildbot.scripts.sendchange.sendchange"
 
     def __init__(self):
-        base.SubcommandOptions.__init__(self)
+        super().__init__()
         self['properties'] = {}
 
     optParameters = [
@@ -243,8 +254,7 @@ class SendChangeOptions(base.SubcommandOptions):
          "Read the log messages from this file (- for stdin)"),
         ("when", "w", None, "timestamp to use as the change time"),
         ("revlink", "l", '', "Revision link (revlink)"),
-        ("encoding", "e", 'utf8',
-            "Encoding of other parameters (default utf8)"),
+        ("encoding", "e", 'utf8', "Encoding of other parameters"),
     ]
 
     buildbotOptions = [
@@ -268,7 +278,7 @@ class SendChangeOptions(base.SubcommandOptions):
         self['properties'][name] = value
 
     def postOptions(self):
-        base.SubcommandOptions.postOptions(self)
+        super().postOptions()
 
         if self.get("revision_file"):
             with open(self["revision_file"], "r") as f:
@@ -295,7 +305,6 @@ class SendChangeOptions(base.SubcommandOptions):
         # fix up the auth with a password if none was given
         auth = self.get('auth')
         if ':' not in auth:
-            import getpass
             pw = getpass.getpass("Enter password for '%s': " % auth)
             auth = "%s:%s" % (auth, pw)
         self['auth'] = tuple(auth.split(':', 1))
@@ -316,6 +325,8 @@ class TryOptions(base.SubcommandOptions):
         # --ssh
         ["host", None, None,
          "Hostname (used by ssh) for the buildmaster"],
+        ["port", None, None,
+         "Port (used by ssh) for the buildmaster"],
         ["jobdir", None, None,
          "Directory (on the buildmaster host) where try jobs are deposited"],
         ["ssh", None, None,
@@ -412,7 +423,7 @@ class TryOptions(base.SubcommandOptions):
     ]
 
     def __init__(self):
-        base.SubcommandOptions.__init__(self)
+        super().__init__()
         self['builders'] = []
         self['properties'] = {}
 
@@ -423,8 +434,8 @@ class TryOptions(base.SubcommandOptions):
         # We need to split the value of this option
         # into a dictionary of properties
         propertylist = option.split(",")
-        for i in range(0, len(propertylist)):
-            splitproperty = propertylist[i].split("=", 1)
+        for prop in propertylist:
+            splitproperty = prop.split("=", 1)
             self['properties'][splitproperty[0]] = splitproperty[1]
 
     def opt_property(self, option):
@@ -438,7 +449,7 @@ class TryOptions(base.SubcommandOptions):
         return "Usage:    buildbot try [options]"
 
     def postOptions(self):
-        base.SubcommandOptions.postOptions(self)
+        super().postOptions()
         opts = self.optionsFile
         if not self['builders']:
             self['builders'] = opts.get('try_builders', [])
@@ -487,13 +498,12 @@ class CheckConfigOptions(base.SubcommandOptions):
 
     def getSynopsis(self):
         return "Usage:\t\tbuildbot checkconfig [configFile]\n" + \
-            "\t\tIf not specified, 'master.cfg' will be used as 'configFile'"
+            "\t\tIf not specified, the config file specified in " + \
+            "'buildbot.tac' from the current directory will be used"
 
     def parseArgs(self, *args):
         if len(args) >= 1:
             self['configFile'] = args[0]
-        else:
-            self['configFile'] = 'master.cfg'
 
 
 class UserOptions(base.SubcommandOptions):
@@ -508,10 +518,10 @@ class UserOptions(base.SubcommandOptions):
         ["op", None, None,
          "User management operation: add, remove, update, get"],
         ["bb_username", None, None,
-         "Username to set for a given user. Only availabe on 'update', "
+         "Username to set for a given user. Only available on 'update', "
          "and bb_password must be given as well."],
         ["bb_password", None, None,
-         "Password to set for a given user. Only availabe on 'update', "
+         "Password to set for a given user. Only available on 'update', "
          "and bb_username must be given as well."],
         ["ids", None, None,
          "User's identifiers, used to find users in 'remove' and 'get' "
@@ -529,13 +539,13 @@ class UserOptions(base.SubcommandOptions):
     ]
     requiredOptions = ['master']
 
-    longdesc = """
+    longdesc = textwrap.dedent("""
     Currently implemented types for --info= are:\n
     git, svn, hg, cvs, darcs, bzr, email
-    """
+    """)
 
     def __init__(self):
-        base.SubcommandOptions.__init__(self)
+        super().__init__()
         self['ids'] = []
         self['info'] = []
 
@@ -552,8 +562,8 @@ class UserOptions(base.SubcommandOptions):
             info_elem["identifier"] = info_list[0]
             self['info'].append(info_elem)
         else:
-            for i in range(0, len(info_list)):
-                split_info = info_list[i].split("=", 1)
+            for info_item in info_list:
+                split_info = info_item.split("=", 1)
 
                 # pull identifier from update --info
                 if ":" in split_info[0]:
@@ -579,7 +589,7 @@ class UserOptions(base.SubcommandOptions):
                         % ', '.join(valid))
 
     def postOptions(self):
-        base.SubcommandOptions.postOptions(self)
+        super().postOptions()
 
         validateMasterOption(self.get('master'))
 
@@ -611,7 +621,7 @@ class UserOptions(base.SubcommandOptions):
         if not info and not ids:
             raise usage.UsageError("must specify either --ids or --info")
 
-        if op == 'add' or op == 'update':
+        if op in ('add', 'update'):
             if ids:
                 raise usage.UsageError("cannot use --ids with 'add' or "
                                        "'update'")
@@ -626,7 +636,7 @@ class UserOptions(base.SubcommandOptions):
                     if 'identifier' in user:
                         raise usage.UsageError("identifier found in add info, "
                                                "use: --info=type=value,type=value,..")
-        if op == 'remove' or op == 'get':
+        if op in ('remove', 'get'):
             if info:
                 raise usage.UsageError("cannot use --info with 'remove' "
                                        "or 'get'")
@@ -636,11 +646,63 @@ class DataSpecOption(base.BasedirMixin, base.SubcommandOptions):
     subcommandFunction = "buildbot.scripts.dataspec.dataspec"
     optParameters = [
         ['out', 'o', "dataspec.json", "output to specified path"],
-        ['global', 'g', None, "output a js script, that sets a global, for inclusion in testsuite"],
+        ['global', 'g', None,
+            "output a js script, that sets a global, for inclusion in testsuite"],
     ]
 
     def getSynopsis(self):
         return "Usage:   buildbot dataspec [options]"
+
+
+class DevProxyOptions(base.BasedirMixin, base.SubcommandOptions):
+
+    """Run a fake web server serving the local ui frontend and a distant rest and websocket api.
+    This command required aiohttp to be installed in the virtualenv"""
+
+    subcommandFunction = "buildbot.scripts.devproxy.devproxy"
+    optFlags = [
+        ["unsafe_ssl", None, "Bypass ssl certificate validation"],
+    ]
+    optParameters = [
+        ["port", "p", 8011,
+         "http port to use"],
+        ["plugins", None, None,
+         "plugin config to use. As json string e.g: --plugins='{\"custom_plugin\": {\"option1\": true}}'"],
+        ["auth_cookie", None, None,
+         "TWISTED_SESSION cookie to be used for auth (taken in developer console: in document.cookie variable)"],
+        ["buildbot_url", "b", "https://buildbot.buildbot.net",
+         "real buildbot url to proxy to (can be http or https)"]
+    ]
+
+
+class CleanupDBOptions(base.BasedirMixin, base.SubcommandOptions):
+    subcommandFunction = "buildbot.scripts.cleanupdb.cleanupDatabase"
+    optFlags = [
+        ["quiet", "q", "Do not emit the commands being run"],
+        ["force", "f",
+            "Force log recompression (useful when changing compression algorithm)"],
+        # when this command has several maintenance jobs, we should make
+        # them optional here. For now there is only one.
+    ]
+    optParameters = [
+    ]
+
+    def getSynopsis(self):
+        return "Usage:    buildbot cleanupdb [options] [<basedir>]"
+
+    longdesc = textwrap.dedent("""
+    This command takes an existing buildmaster working directory and
+    do some optimization on the database.
+
+    This command is frontend for various database maintenance jobs:
+
+    - optimiselogs: This optimization groups logs into bigger chunks
+      to apply higher level of compression.
+
+    This command uses the database specified in
+    the master configuration file.  If you wish to use a database other than
+    the default (sqlite), be sure to set that parameter before upgrading.
+    """)
 
 
 class Options(usage.Options):
@@ -672,13 +734,18 @@ class Options(usage.Options):
         ['user', None, UserOptions,
          "Manage users in buildbot's database"],
         ['dataspec', None, DataSpecOption,
-         "Output data api spec"]
+         "Output data api spec"],
+        ['dev-proxy', None, DevProxyOptions,
+         "Run a fake web server serving the local ui frontend and a distant rest and websocket api."
+         ],
+        ['cleanupdb', None, CleanupDBOptions,
+         "cleanup the database"
+         ]
     ]
 
     def opt_version(self):
-        import buildbot
-        print "Buildbot version: %s" % buildbot.version
-        usage.Options.opt_version(self)
+        print("Buildbot version: %s" % buildbot.version)
+        super().opt_version()
 
     def opt_verbose(self):
         from twisted.python import log
@@ -691,13 +758,15 @@ class Options(usage.Options):
 
 def run():
     config = Options()
+    check_functional_environment(buildbot.config)
     try:
         config.parseOptions(sys.argv[1:])
-    except usage.error, e:
-        print "%s:  %s" % (sys.argv[0], e)
-        print
+    except usage.error as e:
+        print("%s:  %s" % (sys.argv[0], e))
+        print()
+
         c = getattr(config, 'subOptions', config)
-        print str(c)
+        print(str(c))
         sys.exit(1)
 
     subconfig = config.subOptions

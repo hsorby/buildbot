@@ -13,16 +13,22 @@
 #
 # Copyright Buildbot Team Members
 
+
+import types
+
+from twisted.internet import defer
+
 from buildbot.db import model
 from buildbot.test.fake import fakemaster
 from buildbot.test.util import db
+from buildbot.test.util.misc import TestReactorMixin
 
 
-class FakeDBConnector(object):
+class FakeDBConnector:
     pass
 
 
-class ConnectorComponentMixin(db.RealDatabaseMixin):
+class ConnectorComponentMixin(TestReactorMixin, db.RealDatabaseMixin):
 
     """
     Implements a mock DBConnector object, replete with a thread pool and a DB
@@ -35,26 +41,26 @@ class ConnectorComponentMixin(db.RealDatabaseMixin):
     @ivar db.model: DB model
     """
 
-    def setUpConnectorComponent(self, table_names=[], basedir='basedir'):
+    @defer.inlineCallbacks
+    def setUpConnectorComponent(self, table_names=None, basedir='basedir', dialect_name='sqlite'):
+        self.setUpTestReactor()
+
         """Set up C{self.db}, using the given db_url and basedir."""
-        d = self.setUpRealDatabase(table_names=table_names, basedir=basedir)
+        if table_names is None:
+            table_names = []
 
-        def finish_setup(_):
-            self.db = FakeDBConnector()
-            self.db.pool = self.db_pool
-            self.db.master = fakemaster.make_master()
-            self.db.model = model.Model(self.db)
-        d.addCallback(finish_setup)
-        return d
+        yield self.setUpRealDatabase(table_names=table_names, basedir=basedir)
 
+        self.db = FakeDBConnector()
+        self.db.pool = self.db_pool
+        self.db.master = fakemaster.make_master(self)
+        self.db.model = model.Model(self.db)
+        self.db._engine = types.SimpleNamespace(dialect=types.SimpleNamespace(name=dialect_name))
+
+    @defer.inlineCallbacks
     def tearDownConnectorComponent(self):
-        d = self.tearDownRealDatabase()
-
-        def finish_cleanup(_):
-            self.db_pool.shutdown()
-            # break some reference loops, just for fun
-            del self.db.pool
-            del self.db.model
-            del self.db
-        d.addCallback(finish_cleanup)
-        return d
+        yield self.tearDownRealDatabase()
+        # break some reference loops, just for fun
+        del self.db.pool
+        del self.db.model
+        del self.db
